@@ -1,0 +1,8 @@
+{
+  "red_flags": [
+    "unpaid",
+    "web3",
+    "commission-only"
+  ],
+  "confidence_threshold": 0.2
+}
