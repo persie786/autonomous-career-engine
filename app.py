@@ -17,6 +17,7 @@ from database.db_handler import (
 )
 from modules.scraper import source_jobs
 from modules.ai_evaluator import run_sourcing_pipeline
+from modules.persona_builder import build_persona
 
 load_dotenv()
 
@@ -156,11 +157,21 @@ def render_settings():
         log_activity("settings", "Base resume uploaded/replaced.")
         st.toast("Resume saved.")
 
-    if os.path.exists(resume_path):
+   if os.path.exists(resume_path):
         uploaded_at = format_relative_time(
             datetime.fromtimestamp(os.path.getmtime(resume_path)).strftime("%Y-%m-%d %H:%M:%S")
         )
         st.success(f"✅ Resume on file — last updated {uploaded_at}.")
+
+        if st.button("🧠 Build Persona from Resume"):
+            with st.spinner("Extracting resume with Gemini..."):
+                try:
+                    persona = build_persona()
+                    st.toast("Persona built successfully.")
+                    with st.expander("View extracted persona"):
+                        st.json(persona)
+                except Exception as e:
+                    st.error(f"Persona extraction failed: {e}")
     else:
         st.caption("No base resume uploaded yet.")
 
