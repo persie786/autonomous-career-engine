@@ -12,13 +12,17 @@ DEFAULT_SETTINGS = {
 
 
 def load_settings() -> dict:
-    """Returns current settings, creating the file with sane defaults on first run."""
     if not os.path.exists(SETTINGS_PATH):
         save_settings(DEFAULT_SETTINGS)
         return DEFAULT_SETTINGS.copy()
 
-    with open(SETTINGS_PATH, "r") as f:
-        return json.load(f)
+    try:
+        with open(SETTINGS_PATH, "r") as f:
+            saved = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return DEFAULT_SETTINGS.copy()
+
+    return {**DEFAULT_SETTINGS, **saved}
 
 
 def save_settings(settings: dict):

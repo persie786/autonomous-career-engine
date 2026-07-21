@@ -12,25 +12,24 @@ DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jobs.db")
 
 
 def get_connection() -> sqlite3.Connection:
-    """Opens a fresh connection to the SQLite database."""
     return sqlite3.connect(DB_PATH)
 
 
 def init_db():
-    """Creates the jobs and activity_log tables if they don't already exist."""
     conn = get_connection()
     cursor = conn.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS jobs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             company TEXT NOT NULL,
             role TEXT NOT NULL,
-            job_url TEXT,
+            job_url TEXT UNIQUE,
             job_description TEXT,
             status TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN (
-                'Pending', 'Manual Review', 'Needs Consultation', 'Applied',
-                'Rejected', 'Interview', 'Ghosted', 'Failed - Retry', 'Dead'
+                'Pending', 'Manual Review', 'Not Interested', 'Needs Consultation',
+                'Applied', 'Rejected', 'Interview', 'Ghosted', 'Failed - Retry', 'Dead'
             )),
             match_score REAL,
             persona_used TEXT,
@@ -49,13 +48,15 @@ def init_db():
         )
     """)
 
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_jobs_company ON jobs(company)")
+
     conn.commit()
     conn.close()
     logger.info("Database initialized (jobs, activity_log tables ready).")
 
 
 def log_activity(module: str, action_description: str):
-    """Writes one row to activity_log — this feeds the Dashboard's live audit trail."""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
@@ -67,8 +68,20 @@ def log_activity(module: str, action_description: str):
     logger.info(f"[{module}] {action_description}")
 
 
+def job_exists(job_url: str) -> bool:
+    """Checks for an existing row by job_url — call this before add_job() from
+    scraper.py so re-scraping the same listing doesn't create duplicate rows."""
+    if not job_url:
+        return False
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM jobs WHERE job_url = ? LIMIT 1", (job_url,))
+    exists = cursor.fetchone() is not None
+    conn.close()
+    return exists
+
+
 def add_job(company, role, job_url, job_description, match_score=None, persona_used=None) -> int:
-    """Inserts a new job with status 'Pending'. Returns the new row's id."""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -83,7 +96,6 @@ def add_job(company, role, job_url, job_description, match_score=None, persona_u
 
 
 def update_job_status(job_id: int, new_status: str):
-    """Updates a job's status. Moving to 'Applied' also stamps date_applied."""
     conn = get_connection()
     cursor = conn.cursor()
     if new_status == "Applied":
@@ -99,7 +111,6 @@ def update_job_status(job_id: int, new_status: str):
 
 
 def get_jobs(status: str = None) -> list[dict]:
-    """Returns all jobs, or jobs filtered by status if provided."""
     conn = get_connection()
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
@@ -113,7 +124,6 @@ def get_jobs(status: str = None) -> list[dict]:
 
 
 def get_recent_activity(limit: int = 20) -> list[dict]:
-    """Returns the most recent activity_log entries, newest first."""
     conn = get_connection()
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
@@ -131,20 +141,14 @@ def _get_cipher() -> Fernet:
 
 
 def encrypt_data(plaintext: str) -> str:
-    """Encrypts a string for storage. Returns ciphertext as a plain string."""
     return _get_cipher().encrypt(plaintext.encode()).decode()
 
 
 def decrypt_data(ciphertext: str) -> str:
-    """Decrypts a ciphertext string back to plaintext."""
     return _get_cipher().decrypt(ciphertext.encode()).decode()
 
 
 def apply_ghosting_webhook(days_threshold: int = 21) -> int:
-    """
-    Call once at startup. Any job still 'Applied' more than `days_threshold`
-    days after date_applied is auto-updated to 'Ghosted'. Returns count updated.
-    """
     conn = get_connection()
     cursor = conn.cursor()
     cutoff = (datetime.now() - timedelta(days=days_threshold)).strftime("%Y-%m-%d %H:%M:%S")
@@ -168,20 +172,4 @@ def apply_ghosting_webhook(days_threshold: int = 21) -> int:
 if __name__ == "__main__":
     init_db()
     apply_ghosting_webhook()
-
-    test_id = add_job(
-        company="Test Co",
-        role="Software Engineer",
-        job_url="https://example.com/job/123",
-        job_description="A sample job for testing.",
-        match_score=0.87,
-        persona_used="default",
-    )
-    print(f"Inserted test job with id={test_id}")
-    print("Current jobs:", get_jobs())
-
-    encrypted = encrypt_data("this is a secret")
-    print("Encrypted:", encrypted)
-    print("Decrypted:", decrypt_data(encrypted))
-
-    print("Recent activity:", get_recent_activity())
+    print("Schema OK. Existing jobs:", get_jobs())

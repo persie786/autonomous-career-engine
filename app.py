@@ -4,6 +4,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime
 from dotenv import load_dotenv
+from cryptography.fernet import Fernet
 
 from database.db_handler import (
     init_db,
@@ -19,10 +20,12 @@ load_dotenv()
 st.set_page_config(page_title="Autonomous Career Engine", page_icon="🎯", layout="wide")
 
 # Startup tasks — idempotent, safe to run on every rerun
-init_db()
-apply_ghosting_webhook()
+if "app_initialized" not in st.session_state:
+    init_db()
+    apply_ghosting_webhook()
+    st.session_state.app_initialized = True
 
-st.title("🎯 Autonomous Career Engine")
+st.title("Autonomous Career Engine")
 
 MODULE_ICONS = {
     "db_handler": "🗄️",
@@ -155,11 +158,16 @@ def render_settings():
 
     st.divider()
 
-    st.subheader("Encrypted PII Vault")
-    if os.getenv("ENCRYPTION_KEY"):
-        st.success("🔒 Vault active — ENCRYPTION_KEY is configured.")
-    else:
-        st.error("🔓 Vault inactive — ENCRYPTION_KEY missing from .env.")
+st.subheader("Encrypted PII Vault")
+key = os.getenv("ENCRYPTION_KEY")
+if not key:
+    st.error("🔓 Vault inactive — ENCRYPTION_KEY missing from .env.")
+else:
+    try:
+        Fernet(key.encode())
+        st.success("🔒 Vault active — ENCRYPTION_KEY is configured and valid.")
+    except Exception:
+        st.error("🔓 Vault inactive — ENCRYPTION_KEY is present but not a valid Fernet key. Regenerate it.")
 
 
 tab_dashboard, tab_settings, tab_sourcing, tab_studio, tab_anomalies = st.tabs([
