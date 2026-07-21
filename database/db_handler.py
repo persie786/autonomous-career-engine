@@ -58,8 +58,16 @@ def init_db():
     """)
     cursor.execute("PRAGMA table_info(jobs)")
     existing_columns = {row[1] for row in cursor.fetchall()}
-    if "evaluator_reason" not in existing_columns:
-        cursor.execute("ALTER TABLE jobs ADD COLUMN evaluator_reason TEXT")
+    new_columns = {
+        "evaluator_reason": "TEXT",
+        "generated_cv": "TEXT",
+        "generated_cover_letter": "TEXT",
+        "cv_approved_at": "TEXT",
+        "docx_path": "TEXT",
+    }
+    for col_name, col_type in new_columns.items():
+        if col_name not in existing_columns:
+            cursor.execute(f"ALTER TABLE jobs ADD COLUMN {col_name} {col_type}")
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS activity_log (
@@ -197,3 +205,38 @@ if __name__ == "__main__":
     init_db()
     apply_ghosting_webhook()
     print("Schema OK. Existing jobs:", get_jobs())
+
+def get_persona_for_company(company: str) -> str | None:
+    """Looks up whether this company already has a job tied to a specific
+    persona — this is what the Consistency Guardrail checks in cv_generator.py."""
+    conn = get_connection()
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT persona_used FROM jobs WHERE LOWER(company) = LOWER(?) "
+        "AND persona_used IS NOT NULL ORDER BY date_added ASC LIMIT 1",
+        (company,),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return row["persona_used"] if row else None
+
+
+def save_generated_assets(job_id: int, persona_name: str, cv_text: str, cover_letter_text: str, docx_path: str = None):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE jobs SET persona_used = ?, generated_cv = ?, generated_cover_letter = ?, docx_path = ? WHERE id = ?",
+        (persona_name, cv_text, cover_letter_text, docx_path, job_id),
+    )
+    conn.commit()
+    conn.close()
+    log_activity("db_handler", f"Generated CV/cover letter saved for job id={job_id} (persona: {persona_name})")
+
+def approve_assets(job_id: int):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE jobs SET cv_approved_at = datetime('now') WHERE id = ?", (job_id,))
+    conn.commit()
+    conn.close()
+    log_activity("db_handler", f"Job id={job_id} CV/cover letter approved.")

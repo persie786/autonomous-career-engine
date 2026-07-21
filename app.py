@@ -14,10 +14,14 @@ from database.db_handler import (
     apply_ghosting_webhook,
     log_activity,
     update_job_status,
+    save_generated_assets,
+    approve_assets,
 )
 from modules.scraper import source_jobs
 from modules.ai_evaluator import run_sourcing_pipeline
 from modules.persona_builder import build_persona
+from modules.ai_evaluator import run_sourcing_pipeline
+from modules.cv_generator import generate_for_job
 
 load_dotenv()
 
@@ -157,7 +161,7 @@ def render_settings():
         log_activity("settings", "Base resume uploaded/replaced.")
         st.toast("Resume saved.")
 
-   if os.path.exists(resume_path):
+    if os.path.exists(resume_path):
         uploaded_at = format_relative_time(
             datetime.fromtimestamp(os.path.getmtime(resume_path)).strftime("%Y-%m-%d %H:%M:%S")
         )
@@ -228,6 +232,84 @@ else:
         st.success("🔒 Vault active — ENCRYPTION_KEY is configured and valid.")
     except Exception:
         st.error("🔓 Vault inactive — ENCRYPTION_KEY is present but not a valid Fernet key. Regenerate it.")
+    
+def render_asset_studio():
+    st.header("Live Asset Studio")
+    st.caption("Review and approve the tailored CV and cover letter before anything gets submitted.")
+
+    jobs = get_jobs(status="Pending")
+    needs_generation = [j for j in jobs if not j.get("generated_cv")]
+    needs_review = [j for j in jobs if j.get("generated_cv") and not j.get("cv_approved_at")]
+    approved = [j for j in jobs if j.get("cv_approved_at")]
+
+    if not jobs:
+        st.info("No jobs ready for the Studio yet — approve some in the Sourcing Queue first.")
+        return
+
+    if needs_generation:
+        st.subheader("Ready to Generate")
+        for job in needs_generation:
+            with st.container(border=True):
+                col1, col2 = st.columns([4, 1])
+                col1.markdown(f"**{job['role']}** at **{job['company']}**")
+                if col2.button("✨ Generate", key=f"gen_{job['id']}", use_container_width=True):
+                    with st.spinner(f"Generating tailored CV for {job['company']}..."):
+                        try:
+                            generate_for_job(job)
+                            st.toast(f"Generated assets for {job['role']}")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Generation failed: {e}")
+
+    if needs_review:
+        st.subheader("Awaiting Your Review")
+        for job in needs_review:
+            with st.container(border=True):
+                st.markdown(f"**{job['role']}** at **{job['company']}** — persona: `{job['persona_used']}`")
+
+                cv_text = st.text_area(
+                    "Tailored CV content", value=job.get("generated_cv") or "",
+                    key=f"cv_text_{job['id']}", height=200,
+                )
+                cl_text = st.text_area(
+                    "Cover letter", value=job.get("generated_cover_letter") or "",
+                    key=f"cl_text_{job['id']}", height=250,
+                )
+                st.caption(
+                    "Editing here updates the saved text for your records — the downloadable "
+                    ".docx below is Gemini's original generation. Polish the actual file in "
+                    "Word before it goes anywhere."
+                )
+
+                docx_path = job.get("docx_path")
+                if docx_path and os.path.exists(docx_path):
+                    with open(docx_path, "rb") as f:
+                        st.download_button(
+                            "⬇️ Download tailored CV (.docx)", data=f.read(),
+                            file_name=os.path.basename(docx_path), key=f"dl_{job['id']}",
+                        )
+
+                col1, col2 = st.columns(2)
+                if col1.button("💾 Save Edits", key=f"save_{job['id']}", use_container_width=True):
+                    save_generated_assets(job["id"], job["persona_used"], cv_text, cl_text, docx_path)
+                    st.toast("Edits saved.")
+                    st.rerun()
+
+                if col2.button("✅ Approve", key=f"approve_studio_{job['id']}", type="primary", use_container_width=True):
+                    save_generated_assets(job["id"], job["persona_used"], cv_text, cl_text, docx_path)
+                    approve_assets(job["id"])
+                    st.toast(f"Approved: {job['role']} at {job['company']}")
+                    st.rerun()
+
+    if approved:
+        st.subheader("Approved — Awaiting Submission")
+        st.caption("Signed off and ready. Actually submitting them is Week 4's browser agent.")
+        for job in approved:
+            with st.container(border=True):
+                st.markdown(
+                    f"**{job['role']}** at **{job['company']}** — "
+                    f"approved {format_relative_time(job['cv_approved_at'])}"
+                )
 
 
 tab_dashboard, tab_settings, tab_sourcing, tab_studio, tab_anomalies = st.tabs([
@@ -247,7 +329,7 @@ with tab_settings:
 with tab_sourcing:
     render_sourcing_queue()
 with tab_studio:
-    st.info("Coming in Week 3: dynamic CV/cover letter generation and approval.")
+    render_asset_studio()
 
 with tab_anomalies:
     st.info("Coming in Week 4: browser agent anomalies flagged for manual review.")
