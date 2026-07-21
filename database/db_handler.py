@@ -38,6 +38,28 @@ def init_db():
             date_applied TEXT
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company TEXT NOT NULL,
+            role TEXT NOT NULL,
+            job_url TEXT UNIQUE,
+            job_description TEXT,
+            status TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN (
+                'Pending', 'Manual Review', 'Not Interested', 'Needs Consultation',
+                'Applied', 'Rejected', 'Interview', 'Ghosted', 'Failed - Retry', 'Dead'
+            )),
+            match_score REAL,
+            persona_used TEXT,
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            date_added TEXT NOT NULL DEFAULT (datetime('now')),
+            date_applied TEXT
+        )
+    """)
+    cursor.execute("PRAGMA table_info(jobs)")
+    existing_columns = {row[1] for row in cursor.fetchall()}
+    if "evaluator_reason" not in existing_columns:
+        cursor.execute("ALTER TABLE jobs ADD COLUMN evaluator_reason TEXT")
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS activity_log (
@@ -81,13 +103,13 @@ def job_exists(job_url: str) -> bool:
     return exists
 
 
-def add_job(company, role, job_url, job_description, match_score=None, persona_used=None) -> int:
+def add_job(company, role, job_url, job_description, match_score=None, persona_used=None, evaluator_reason=None) -> int:
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO jobs (company, role, job_url, job_description, match_score, persona_used)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (company, role, job_url, job_description, match_score, persona_used))
+        INSERT INTO jobs (company, role, job_url, job_description, match_score, persona_used, evaluator_reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (company, role, job_url, job_description, match_score, persona_used, evaluator_reason))
     conn.commit()
     job_id = cursor.lastrowid
     conn.close()
@@ -121,6 +143,8 @@ def get_jobs(status: str = None) -> list[dict]:
     rows = cursor.fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+    
 
 
 def get_recent_activity(limit: int = 20) -> list[dict]:

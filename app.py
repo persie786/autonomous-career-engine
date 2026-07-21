@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 from datetime import datetime
 from dotenv import load_dotenv
 from cryptography.fernet import Fernet
+from utils.settings import load_settings, save_settings
 
 from database.db_handler import (
     init_db,
@@ -12,8 +13,10 @@ from database.db_handler import (
     get_recent_activity,
     apply_ghosting_webhook,
     log_activity,
+    update_job_status,
 )
-from utils.settings import load_settings, save_settings
+from modules.scraper import source_jobs
+from modules.ai_evaluator import run_sourcing_pipeline
 
 load_dotenv()
 
@@ -91,6 +94,52 @@ def render_dashboard():
             c1, c2 = st.columns([5, 1])
             c1.markdown(f"{icon} **{entry['module']}** — {entry['action_description']}")
             c2.caption(format_relative_time(entry["timestamp"]))
+
+def render_sourcing_queue():
+    st.header("Sourcing Queue")
+
+    st.subheader("Run a Sourcing Pass")
+    st.caption("Scrapes fresh listings, drops red flags and duplicates, then sends survivors to the AI evaluator.")
+    if st.button("🚀 Trigger JobSpy", type="primary"):
+        with st.spinner("Scraping and evaluating — can take a minute or two for a full batch..."):
+            candidates = source_jobs()
+            if not candidates:
+                st.info("No new candidates this run — all duplicates, red-flagged, or the scrape came back empty.")
+            else:
+                counts = run_sourcing_pipeline(candidates)
+                st.success(
+                    f"Done — {counts['auto_approved']} auto-approved, "
+                    f"{counts['manual_review']} need your review, "
+                    f"{counts['rejected']} rejected by the evaluator, "
+                    f"{counts['needs_consultation']} need a look (evaluator hiccup)."
+                )
+        st.rerun()
+
+    st.divider()
+
+    st.subheader("Awaiting Your Review")
+    st.caption("Passed red-flag filtering and got a GO from the evaluator, but scored below your confidence threshold.")
+
+    pending = get_jobs(status="Manual Review")
+    if not pending:
+        st.info("Nothing waiting on you right now.")
+    else:
+        for job in pending:
+            with st.container(border=True):
+                col1, col2 = st.columns([4, 1])
+                with col1:
+                    st.markdown(f"**{job['role']}** at **{job['company']}**")
+                    st.caption(f"Match score: {job['match_score']:.0%} — {job.get('evaluator_reason', '')}")
+                    st.markdown(f"[View listing]({job['job_url']})")
+                with col2:
+                    if st.button("✅ Approve", key=f"approve_{job['id']}", use_container_width=True):
+                        update_job_status(job["id"], "Pending")
+                        st.toast(f"Approved: {job['role']}")
+                        st.rerun()
+                    if st.button("❌ Reject", key=f"reject_{job['id']}", use_container_width=True):
+                        update_job_status(job["id"], "Not Interested")
+                        st.toast(f"Passed on: {job['role']}")
+                        st.rerun()
 
 
 def render_settings():
@@ -185,8 +234,7 @@ with tab_settings:
     render_settings()
 
 with tab_sourcing:
-    st.info("Coming in Week 2: JobSpy sourcing and the manual approval queue.")
-
+    render_sourcing_queue()
 with tab_studio:
     st.info("Coming in Week 3: dynamic CV/cover letter generation and approval.")
 
