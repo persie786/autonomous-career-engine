@@ -8,6 +8,7 @@ from cryptography.fernet import Fernet
 from utils.settings import load_settings, save_settings
 from modules.browser_agent import prepare_application, close_browser_session, mark_prep_failed, confirm_submitted
 from utils.field_memory import load_field_memory, save_field_memory_answer, delete_field_memory_answer
+from modules.email_monitor import check_inbox
 
 from database.db_handler import (
     init_db,
@@ -66,6 +67,18 @@ def format_relative_time(timestamp_str: str) -> str:
 
 def render_dashboard():
     st.header("Dashboard & Analytics")
+    if st.button("📧 Check Inbox for Updates"):
+        with st.spinner("Scanning inbox..."):
+            try:
+                counts = check_inbox()
+                st.success(
+                    f"Scanned {counts['scanned']}, matched {counts['matched']} to applications — "
+                    f"{counts['rejections']} rejection(s), {counts['interviews']} interview(s), "
+                    f"{counts['flagged']} flagged for review."
+                )
+            except Exception as e:
+                st.error(f"Inbox check failed: {e}")
+        st.rerun()
 
     jobs = get_jobs()
     df = pd.DataFrame(jobs)
