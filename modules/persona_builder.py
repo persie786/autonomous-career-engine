@@ -3,7 +3,7 @@ import os
 from pypdf import PdfReader
 from google import genai
 from google.genai import types
-
+from utils.ai_router import generate_json
 from utils.logger import setup_logger
 from dotenv import load_dotenv
 load_dotenv()
@@ -14,8 +14,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESUME_PATH = os.path.join(PROJECT_ROOT, "data", "base_resume.pdf")
 PERSONAS_PATH = os.path.join(PROJECT_ROOT, "data", "personas.json")
 
-MODEL = "gemini-3.5-flash"
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
 
 EXTRACTION_PROMPT = """Extract this candidate's resume into structured JSON with exactly these fields:
 {
@@ -56,22 +55,14 @@ def build_persona(name: str = "default") -> dict:
             "than actual selectable text. pypdf can't OCR scanned PDFs."
         )
 
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=EXTRACTION_PROMPT + resume_text,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            temperature=0.1,
-        ),
-    )
-
-    persona = json.loads(response.text)
+    raw_text, model_used = generate_json("", EXTRACTION_PROMPT + resume_text, temperature=0.1)
+    persona = json.loads(raw_text)
 
     personas = load_personas()
     personas[name] = persona
     save_personas(personas)
 
-    logger.info(f"Persona '{name}' built from resume ({len(resume_text)} chars extracted).")
+    logger.info(f"Persona '{name}' built from resume ({len(resume_text)} chars extracted) via {model_used}.")
     return persona
 
 

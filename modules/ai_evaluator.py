@@ -9,13 +9,9 @@ from utils.logger import setup_logger
 
 logger = setup_logger("ai_evaluator")
 
-client = OpenAI(
-    api_key=os.getenv("GROQ_API_KEY"),
-    base_url="https://api.groq.com/openai/v1",
-)
+from utils.ai_router import generate_json
 
-MODEL = "llama-3.3-70b-versatile"
-MAX_DESCRIPTION_CHARS = 3000  # keeps token usage predictable against Groq's free-tier limits
+MAX_DESCRIPTION_CHARS = 3000 # keeps token usage predictable against Groq's free-tier limits
 
 SYSTEM_PROMPT = """You are a job-fit evaluator for an entry-level software engineering \
 candidate's automated job search. Given one job posting, decide whether it's worth pursuing.
@@ -40,16 +36,8 @@ def evaluate_job(job: dict) -> dict | None:
     user_message = f"Job title: {job['role']}\nCompany: {job['company']}\nDescription:\n{description}"
 
     try:
-        response = client.chat.completions.create(
-            model=MODEL,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_message},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.2,
-        )
-        data = json.loads(response.choices[0].message.content)
+        raw_text, model_used = generate_json(SYSTEM_PROMPT, user_message, temperature=0.2)
+        data = json.loads(raw_text)
     except Exception:
         logger.exception(f"Evaluation failed for '{job['role']}' at {job['company']}")
         return None
@@ -62,7 +50,12 @@ def evaluate_job(job: dict) -> dict | None:
         logger.warning(f"Evaluator returned unexpected shape: {data}")
         return None
 
-    return {"decision": decision, "match_score": max(0.0, min(1.0, float(score))), "reason": reason}
+    return {
+        "decision": decision,
+        "match_score": max(0.0, min(1.0, float(score))),
+        "reason": reason,
+        "model_used": model_used,
+    }
 
 
 def run_sourcing_pipeline(candidates: list[dict]) -> dict:
@@ -101,7 +94,8 @@ def run_sourcing_pipeline(candidates: list[dict]) -> dict:
                 counts["manual_review"] += 1
 
             log_activity("ai_evaluator",
-                          f"GO ({result['match_score']:.2f}): {job['role']} at {job['company']} — {result['reason']}")
+                          f"GO ({result['match_score']:.2f} via {result['model_used']}): "
+                          f"{job['role']} at {job['company']} — {result['reason']}")
 
         time.sleep(2)  # stays comfortably under Groq's free-tier 30 req/min
 

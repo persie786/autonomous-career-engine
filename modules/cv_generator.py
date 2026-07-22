@@ -7,6 +7,7 @@ from docx import Document
 from database.db_handler import get_persona_for_company, save_generated_assets, log_activity
 from modules.persona_builder import get_persona
 from utils.logger import setup_logger
+from utils.ai_router import generate_json
 
 logger = setup_logger("cv_generator")
 
@@ -14,8 +15,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TEMPLATE_PATH = os.path.join(PROJECT_ROOT, "templates", "master_cv.docx")
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, "data", "generated_cvs")
 
-MODEL = "gemini-3.5-flash"
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
 
 GENERATION_PROMPT = """You are tailoring a candidate's CV and writing a cover letter for one \
 specific job application.
@@ -60,13 +60,9 @@ def generate_application_assets(job: dict, persona: dict) -> dict:
         company=job["company"],
         description=job["job_description"][:4000],
     )
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.4),
-    )
-    cleaned_text = response.text.replace("```json", "").replace("```", "").strip()
-    return json.loads(cleaned_text)
+    raw_text, model_used = generate_json("", prompt, temperature=0.4)
+    logger.info(f"Assets for job id={job['id']} generated via {model_used}")
+    return json.loads(raw_text)
 
 
 def _replace_tag(doc: Document, tag: str, replacement_text: str) -> bool:
