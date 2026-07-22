@@ -78,6 +78,14 @@ def init_db():
         )
     """)
 
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS scrape_stats (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            total_scraped INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    cursor.execute("INSERT OR IGNORE INTO scrape_stats (id, total_scraped) VALUES (1, 0)")
+
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_jobs_company ON jobs(company)")
 
@@ -85,6 +93,24 @@ def init_db():
     conn.close()
     logger.info("Database initialized (jobs, activity_log tables ready).")
 
+
+def increment_scraped_count(amount: int):
+    if amount <= 0:
+        return
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE scrape_stats SET total_scraped = total_scraped + ? WHERE id = 1", (amount,))
+    conn.commit()
+    conn.close()
+
+
+def get_scraped_count() -> int:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT total_scraped FROM scrape_stats WHERE id = 1")
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else 0
 
 def log_activity(module: str, action_description: str):
     conn = get_connection()
@@ -155,14 +181,26 @@ def get_jobs(status: str = None) -> list[dict]:
     
 
 
-def get_recent_activity(limit: int = 20) -> list[dict]:
+def get_recent_activity(limit: int = 30, module: str = None) -> list[dict]:
     conn = get_connection()
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM activity_log ORDER BY timestamp DESC LIMIT ?", (limit,))
+    if module:
+        cursor.execute("SELECT * FROM activity_log WHERE module = ? ORDER BY timestamp DESC LIMIT ?", (module, limit))
+    else:
+        cursor.execute("SELECT * FROM activity_log ORDER BY timestamp DESC LIMIT ?", (limit,))
     rows = cursor.fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+
+def get_activity_modules() -> list[str]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT DISTINCT module FROM activity_log ORDER BY module ASC")
+    modules = [row[0] for row in cursor.fetchall()]
+    conn.close()
+    return modules
 
 
 def _get_cipher() -> Fernet:

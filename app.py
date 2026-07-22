@@ -14,6 +14,8 @@ from database.db_handler import (
     init_db,
     get_jobs,
     get_recent_activity,
+    get_activity_modules,
+    get_scraped_count,
     apply_ghosting_webhook,
     log_activity,
     update_job_status,
@@ -67,6 +69,7 @@ def format_relative_time(timestamp_str: str) -> str:
 
 def render_dashboard():
     st.header("Dashboard & Analytics")
+
     if st.button("📧 Check Inbox for Updates"):
         with st.spinner("Scanning inbox..."):
             try:
@@ -87,27 +90,46 @@ def render_dashboard():
     if df.empty:
         st.info("No jobs yet — this fills in once Week 2's scraper starts feeding jobs through.")
     else:
-        scraped = len(df)
-        approved = len(df[~df["status"].isin(["Rejected", "Dead"])])
-        applied = len(df[df["status"].isin(["Applied", "Interview", "Ghosted"])])
+        scraped = get_scraped_count()
+        evaluated = len(df)  # every saved row already passed the AI evaluator's GO decision
+        still_active = len(df[~df["status"].isin(["Not Interested", "Dead"])])
+        applied = len(df[df["date_applied"].notna()])
         interview = len(df[df["status"] == "Interview"])
 
+        scraped = max(scraped, evaluated)  # see note above — pre-Week-6 history wasn't recorded
+
         fig = go.Figure(go.Funnel(
-            y=["Scraped", "Approved", "Applied", "Interview"],
-            x=[scraped, approved, applied, interview],
-            textinfo="value+percent initial",
+            y=["Scraped", "Evaluated (GO)", "Still Active", "Applied", "Interview"],
+            x=[scraped, evaluated, still_active, applied, interview],
+            textinfo="value+percent initial+percent previous",
         ))
         st.plotly_chart(fig, use_container_width=True)
 
+        st.subheader("Current Outcomes")
+        st.caption("Not part of the funnel's narrowing path — these are where jobs currently sit or ended up.")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Awaiting Your Review", len(df[df["status"] == "Manual Review"]))
+        c2.metric("Needs Consultation", len(df[df["status"] == "Needs Consultation"]))
+        c3.metric("Ghosted", len(df[df["status"] == "Ghosted"]))
+        c4.metric("Rejected (post-app)", len(df[df["status"] == "Rejected"]))
+
     st.subheader("Execution Audit Trail")
-    col1, col2 = st.columns([5, 1])
+    col1, col2, col3 = st.columns([3, 2, 1])
     col1.caption(f"Last updated: {datetime.now().strftime('%H:%M:%S')}")
-    if col2.button("🔄 Refresh", use_container_width=True):
+
+    modules = get_activity_modules()
+    selected_module = col2.selectbox("Filter by module", ["All"] + modules, label_visibility="collapsed")
+    if col3.button("🔄 Refresh", use_container_width=True):
         st.rerun()
 
-    activity = get_recent_activity(limit=30)
+    search_term = st.text_input("Search activity", placeholder="🔍 Search descriptions...", label_visibility="collapsed")
+
+    activity = get_recent_activity(limit=50, module=None if selected_module == "All" else selected_module)
+    if search_term:
+        activity = [a for a in activity if search_term.lower() in a["action_description"].lower()]
+
     if not activity:
-        st.info("No activity logged yet.")
+        st.info("No matching activity.")
     else:
         for entry in activity:
             icon = MODULE_ICONS.get(entry["module"], "•")

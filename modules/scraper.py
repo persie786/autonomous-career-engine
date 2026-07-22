@@ -1,7 +1,7 @@
 import pandas as pd
 from jobspy import scrape_jobs
 
-from database.db_handler import job_exists, log_activity
+from database.db_handler import job_exists, log_activity, increment_scraped_count
 from utils.settings import load_settings
 from utils.logger import setup_logger
 
@@ -63,6 +63,7 @@ def source_jobs() -> list[dict]:
         return []
 
     total_scraped = len(raw)
+    increment_scraped_count(total_scraped)
     if total_scraped == 0:
         log_activity("scraper", "Scrape run found 0 listings.")
         return []
