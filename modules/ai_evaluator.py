@@ -11,7 +11,9 @@ logger = setup_logger("ai_evaluator")
 
 from utils.ai_router import generate_json
 
-MAX_DESCRIPTION_CHARS = 3000 # keeps token usage predictable against Groq's free-tier limits
+MAX_DESCRIPTION_CHARS = (
+    3000  # keeps token usage predictable against Groq's free-tier limits
+)
 
 SYSTEM_PROMPT = """You are a job-fit evaluator for an entry-level software engineering \
 candidate's automated job search. Given one job posting, decide whether it's worth pursuing.
@@ -36,7 +38,9 @@ def evaluate_job(job: dict) -> dict | None:
     user_message = f"Job title: {job['role']}\nCompany: {job['company']}\nDescription:\n{description}"
 
     try:
-        raw_text, model_used = generate_json(SYSTEM_PROMPT, user_message, temperature=0.2)
+        raw_text, model_used = generate_json(
+            SYSTEM_PROMPT, user_message, temperature=0.2
+        )
         data = json.loads(raw_text)
     except Exception:
         logger.exception(f"Evaluation failed for '{job['role']}' at {job['company']}")
@@ -67,25 +71,42 @@ def run_sourcing_pipeline(candidates: list[dict]) -> dict:
     settings = load_settings()
     threshold = settings.get("confidence_threshold", 0.75)
 
-    counts = {"auto_approved": 0, "manual_review": 0, "rejected": 0, "needs_consultation": 0}
+    counts = {
+        "auto_approved": 0,
+        "manual_review": 0,
+        "rejected": 0,
+        "needs_consultation": 0,
+    }
 
     for job in candidates:
         result = evaluate_job(job)
 
         if result is None:
-            job_id = add_job(company=job["company"], role=job["role"],
-                              job_url=job["job_url"], job_description=job["job_description"])
+            job_id = add_job(
+                company=job["company"],
+                role=job["role"],
+                job_url=job["job_url"],
+                job_description=job["job_description"],
+            )
             update_job_status(job_id, "Needs Consultation")
             counts["needs_consultation"] += 1
 
         elif result["decision"] == "NO-GO":
-            log_activity("ai_evaluator", f"NO-GO: {job['role']} at {job['company']} — {result['reason']}")
+            log_activity(
+                "ai_evaluator",
+                f"NO-GO: {job['role']} at {job['company']} — {result['reason']}",
+            )
             counts["rejected"] += 1
 
         else:
-            job_id = add_job(company=job["company"], role=job["role"], job_url=job["job_url"],
-                              job_description=job["job_description"], match_score=result["match_score"],
-                              evaluator_reason=result["reason"])
+            job_id = add_job(
+                company=job["company"],
+                role=job["role"],
+                job_url=job["job_url"],
+                job_description=job["job_description"],
+                match_score=result["match_score"],
+                evaluator_reason=result["reason"],
+            )
 
             if result["match_score"] >= threshold:
                 counts["auto_approved"] += 1  # stays 'Pending', the schema default
@@ -93,9 +114,11 @@ def run_sourcing_pipeline(candidates: list[dict]) -> dict:
                 update_job_status(job_id, "Manual Review")
                 counts["manual_review"] += 1
 
-            log_activity("ai_evaluator",
-                          f"GO ({result['match_score']:.2f} via {result['model_used']}): "
-                          f"{job['role']} at {job['company']} — {result['reason']}")
+            log_activity(
+                "ai_evaluator",
+                f"GO ({result['match_score']:.2f} via {result['model_used']}): "
+                f"{job['role']} at {job['company']} — {result['reason']}",
+            )
 
         time.sleep(2)  # stays comfortably under Groq's free-tier 30 req/min
 

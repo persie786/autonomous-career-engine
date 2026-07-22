@@ -9,9 +9,9 @@ logger = setup_logger("scraper")
 
 # --- Edit these to match your actual job search ---
 SEARCH_TERM = "software engineer"
-LOCATION = "Lahore, Pakistan"       # or "Remote" — try both, compare result counts
-COUNTRY_INDEED = "Pakistan"         # required by Indeed/Glassdoor even if unused elsewhere;
-                                     # check JobSpy's supported-country list if this site returns 0 results
+LOCATION = "Lahore, Pakistan"  # or "Remote" — try both, compare result counts
+COUNTRY_INDEED = "Pakistan"  # required by Indeed/Glassdoor even if unused elsewhere;
+# check JobSpy's supported-country list if this site returns 0 results
 SITE_NAMES = ["indeed", "linkedin", "zip_recruiter"]
 RESULTS_WANTED = 20
 HOURS_OLD = 48
@@ -45,7 +45,9 @@ def source_jobs() -> list[dict]:
     settings = load_settings()
     red_flags = settings.get("red_flags", [])
 
-    logger.info(f"Scraping '{SEARCH_TERM}' in '{LOCATION}' across {SITE_NAMES} (last {HOURS_OLD}h)")
+    logger.info(
+        f"Scraping '{SEARCH_TERM}' in '{LOCATION}' across {SITE_NAMES} (last {HOURS_OLD}h)"
+    )
 
     try:
         raw = scrape_jobs(
@@ -90,15 +92,19 @@ def source_jobs() -> list[dict]:
         matched_flag = _matches_red_flag(title, description, red_flags)
         if matched_flag:
             dropped_red_flag += 1
-            logger.info(f"Dropped '{title}' at {company} — matched red flag '{matched_flag}'")
+            logger.info(
+                f"Dropped '{title}' at {company} — matched red flag '{matched_flag}'"
+            )
             continue
 
-        candidates.append({
-            "company": company,
-            "role": title,
-            "job_url": job_url,
-            "job_description": description,
-        })
+        candidates.append(
+            {
+                "company": company,
+                "role": title,
+                "job_url": job_url,
+                "job_description": description,
+            }
+        )
 
     log_activity(
         "scraper",
@@ -106,7 +112,9 @@ def source_jobs() -> list[dict]:
         f"{dropped_duplicate} (duplicate), {dropped_incomplete} (incomplete) — "
         f"{len(candidates)} candidate(s) ready for evaluation.",
     )
-    logger.info(f"Scrape complete: {len(candidates)} new candidate(s) out of {total_scraped} scraped.")
+    logger.info(
+        f"Scrape complete: {len(candidates)} new candidate(s) out of {total_scraped} scraped."
+    )
 
     return candidates
 

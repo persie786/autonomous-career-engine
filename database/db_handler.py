@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from cryptography.fernet import Fernet
 from utils.logger import setup_logger
+import json
 
 load_dotenv()
 logger = setup_logger("db_handler")
@@ -84,7 +85,21 @@ def init_db():
             total_scraped INTEGER NOT NULL DEFAULT 0
         )
     """)
-    cursor.execute("INSERT OR IGNORE INTO scrape_stats (id, total_scraped) VALUES (1, 0)")
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS weekly_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            period_start TEXT NOT NULL,
+            period_end TEXT NOT NULL,
+            generated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            stats_json TEXT NOT NULL,
+            summary_text TEXT
+        )
+    """)
+
+    cursor.execute(
+        "INSERT OR IGNORE INTO scrape_stats (id, total_scraped) VALUES (1, 0)"
+    )
 
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_jobs_company ON jobs(company)")
@@ -99,7 +114,10 @@ def increment_scraped_count(amount: int):
         return
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("UPDATE scrape_stats SET total_scraped = total_scraped + ? WHERE id = 1", (amount,))
+    cursor.execute(
+        "UPDATE scrape_stats SET total_scraped = total_scraped + ? WHERE id = 1",
+        (amount,),
+    )
     conn.commit()
     conn.close()
 
@@ -111,6 +129,7 @@ def get_scraped_count() -> int:
     row = cursor.fetchone()
     conn.close()
     return row[0] if row else 0
+
 
 def log_activity(module: str, action_description: str):
     conn = get_connection()
@@ -137,13 +156,32 @@ def job_exists(job_url: str) -> bool:
     return exists
 
 
-def add_job(company, role, job_url, job_description, match_score=None, persona_used=None, evaluator_reason=None) -> int:
+def add_job(
+    company,
+    role,
+    job_url,
+    job_description,
+    match_score=None,
+    persona_used=None,
+    evaluator_reason=None,
+) -> int:
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("""
+    cursor.execute(
+        """
         INSERT INTO jobs (company, role, job_url, job_description, match_score, persona_used, evaluator_reason)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (company, role, job_url, job_description, match_score, persona_used, evaluator_reason))
+    """,
+        (
+            company,
+            role,
+            job_url,
+            job_description,
+            match_score,
+            persona_used,
+            evaluator_reason,
+        ),
+    )
     conn.commit()
     job_id = cursor.lastrowid
     conn.close()
@@ -171,14 +209,14 @@ def get_jobs(status: str = None) -> list[dict]:
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     if status:
-        cursor.execute("SELECT * FROM jobs WHERE status = ? ORDER BY date_added DESC", (status,))
+        cursor.execute(
+            "SELECT * FROM jobs WHERE status = ? ORDER BY date_added DESC", (status,)
+        )
     else:
         cursor.execute("SELECT * FROM jobs ORDER BY date_added DESC")
     rows = cursor.fetchall()
     conn.close()
     return [dict(row) for row in rows]
-
-    
 
 
 def get_recent_activity(limit: int = 30, module: str = None) -> list[dict]:
@@ -186,9 +224,14 @@ def get_recent_activity(limit: int = 30, module: str = None) -> list[dict]:
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     if module:
-        cursor.execute("SELECT * FROM activity_log WHERE module = ? ORDER BY timestamp DESC LIMIT ?", (module, limit))
+        cursor.execute(
+            "SELECT * FROM activity_log WHERE module = ? ORDER BY timestamp DESC LIMIT ?",
+            (module, limit),
+        )
     else:
-        cursor.execute("SELECT * FROM activity_log ORDER BY timestamp DESC LIMIT ?", (limit,))
+        cursor.execute(
+            "SELECT * FROM activity_log ORDER BY timestamp DESC LIMIT ?", (limit,)
+        )
     rows = cursor.fetchall()
     conn.close()
     return [dict(row) for row in rows]
@@ -221,20 +264,28 @@ def decrypt_data(ciphertext: str) -> str:
 def apply_ghosting_webhook(days_threshold: int = 21) -> int:
     conn = get_connection()
     cursor = conn.cursor()
-    cutoff = (datetime.now() - timedelta(days=days_threshold)).strftime("%Y-%m-%d %H:%M:%S")
+    cutoff = (datetime.now() - timedelta(days=days_threshold)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
 
-    cursor.execute("""
+    cursor.execute(
+        """
         UPDATE jobs
         SET status = 'Ghosted'
         WHERE status = 'Applied' AND date_applied IS NOT NULL AND date_applied < ?
-    """, (cutoff,))
+    """,
+        (cutoff,),
+    )
 
     updated_count = cursor.rowcount
     conn.commit()
     conn.close()
 
     if updated_count > 0:
-        log_activity("db_handler", f"Ghosting webhook: {updated_count} job(s) auto-marked as Ghosted.")
+        log_activity(
+            "db_handler",
+            f"Ghosting webhook: {updated_count} job(s) auto-marked as Ghosted.",
+        )
 
     return updated_count
 
@@ -243,6 +294,7 @@ if __name__ == "__main__":
     init_db()
     apply_ghosting_webhook()
     print("Schema OK. Existing jobs:", get_jobs())
+
 
 def get_persona_for_company(company: str) -> str | None:
     """Looks up whether this company already has a job tied to a specific
@@ -260,7 +312,13 @@ def get_persona_for_company(company: str) -> str | None:
     return row["persona_used"] if row else None
 
 
-def save_generated_assets(job_id: int, persona_name: str, cv_text: str, cover_letter_text: str, docx_path: str = None):
+def save_generated_assets(
+    job_id: int,
+    persona_name: str,
+    cv_text: str,
+    cover_letter_text: str,
+    docx_path: str = None,
+):
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
@@ -269,12 +327,83 @@ def save_generated_assets(job_id: int, persona_name: str, cv_text: str, cover_le
     )
     conn.commit()
     conn.close()
-    log_activity("db_handler", f"Generated CV/cover letter saved for job id={job_id} (persona: {persona_name})")
+    log_activity(
+        "db_handler",
+        f"Generated CV/cover letter saved for job id={job_id} (persona: {persona_name})",
+    )
+
 
 def approve_assets(job_id: int):
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("UPDATE jobs SET cv_approved_at = datetime('now') WHERE id = ?", (job_id,))
+    cursor.execute(
+        "UPDATE jobs SET cv_approved_at = datetime('now') WHERE id = ?", (job_id,)
+    )
     conn.commit()
     conn.close()
     log_activity("db_handler", f"Job id={job_id} CV/cover letter approved.")
+
+
+def get_company_history(company: str, exclude_job_id: int = None) -> list[dict]:
+    """All prior jobs at this company — what the Studio shows you before
+    you generate, so the Guardrail's decision is visible, not just enforced."""
+    conn = get_connection()
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    if exclude_job_id:
+        cursor.execute(
+            "SELECT * FROM jobs WHERE LOWER(company) = LOWER(?) AND id != ? ORDER BY date_added ASC",
+            (company, exclude_job_id),
+        )
+    else:
+        cursor.execute(
+            "SELECT * FROM jobs WHERE LOWER(company) = LOWER(?) ORDER BY date_added ASC",
+            (company,),
+        )
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+def get_jobs_in_period(date_field: str, start: str, end: str) -> list[dict]:
+    if date_field not in ("date_added", "date_applied"):  # whitelisted — never interpolate raw column names
+        raise ValueError("Invalid date_field")
+    conn = get_connection()
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(f"SELECT * FROM jobs WHERE {date_field} BETWEEN ? AND ?", (start, end))
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def get_status_counts() -> dict:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT status, COUNT(*) FROM jobs GROUP BY status")
+    counts = dict(cursor.fetchall())
+    conn.close()
+    return counts
+
+
+def save_weekly_report(period_start: str, period_end: str, stats: dict, summary_text: str) -> int:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO weekly_reports (period_start, period_end, stats_json, summary_text) VALUES (?, ?, ?, ?)",
+        (period_start, period_end, json.dumps(stats), summary_text),
+    )
+    conn.commit()
+    report_id = cursor.lastrowid
+    conn.close()
+    log_activity("report_generator", f"Weekly report generated for {period_start} to {period_end}")
+    return report_id
+
+
+def get_weekly_reports(limit: int = 10) -> list[dict]:
+    conn = get_connection()
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM weekly_reports ORDER BY generated_at DESC LIMIT ?", (limit,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
