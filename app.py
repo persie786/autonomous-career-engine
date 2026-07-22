@@ -6,6 +6,8 @@ from datetime import datetime
 from dotenv import load_dotenv
 from cryptography.fernet import Fernet
 from utils.settings import load_settings, save_settings
+from modules.browser_agent import prepare_application, close_browser_session, mark_prep_failed, confirm_submitted
+from utils.field_memory import load_field_memory, save_field_memory_answer, delete_field_memory_answer
 
 from database.db_handler import (
     init_db,
@@ -221,6 +223,26 @@ def render_settings():
         st.toast(f"Confidence threshold set to {threshold:.0%}")
 
     st.divider()
+    st.subheader("Field Memory Cache")
+    st.caption("Custom application questions and your saved answer — reused automatically when the browser agent finds a matching label.")
+
+    fm = load_field_memory()
+    new_q = st.text_input("Question (match this label text)", key="new_fm_q")
+    new_a = st.text_area("Your answer", key="new_fm_a")
+    if st.button("Save Answer") and new_q.strip() and new_a.strip():
+        save_field_memory_answer(new_q.strip(), new_a.strip())
+        st.toast("Saved.")
+        st.rerun()
+
+    for question, answer in fm.items():
+        with st.container(border=True):
+            st.markdown(f"**{question}**")
+            st.caption(answer[:150] + ("..." if len(answer) > 150 else ""))
+            if st.button("🗑️ Remove", key=f"remove_fm_{question}"):
+                delete_field_memory_answer(question)
+                st.rerun()
+
+    st.divider()
 
 st.subheader("Encrypted PII Vault")
 key = os.getenv("ENCRYPTION_KEY")
@@ -303,14 +325,66 @@ def render_asset_studio():
 
     if approved:
         st.subheader("Approved — Awaiting Submission")
-        st.caption("Signed off and ready. Actually submitting them is Week 4's browser agent.")
+        st.caption("Signed off and ready. The agent fills what it can identify in a real browser window — you review and click Submit yourself.")
+
+        if "browser_sessions" not in st.session_state:
+            st.session_state.browser_sessions = {}
+
         for job in approved:
             with st.container(border=True):
-                st.markdown(
-                    f"**{job['role']}** at **{job['company']}** — "
-                    f"approved {format_relative_time(job['cv_approved_at'])}"
-                )
+                st.markdown(f"**{job['role']}** at **{job['company']}** — approved {format_relative_time(job['cv_approved_at'])}")
 
+                session = st.session_state.browser_sessions.get(job["id"])
+
+                if session is None:
+                    if st.button("🌐 Open & Autofill Application", key=f"prep_{job['id']}"):
+                        with st.spinner("Opening browser and filling what it can find..."):
+                            try:
+                                result = prepare_application(job)
+                                st.session_state.browser_sessions[job["id"]] = result
+                                st.toast(f"Filled: {', '.join(result['filled']) or 'nothing recognized'}")
+                            except Exception as e:
+                                mark_prep_failed(job["id"], job.get("retry_count", 0))
+                                st.error(f"Prep failed: {e}")
+                        st.rerun()
+                else:
+                    st.info(
+                        f"Browser window open. Filled: {', '.join(session['filled']) or 'nothing'}. "
+                        f"Needs your attention: {', '.join(session['skipped']) or 'nothing'}. "
+                        "Review everything in the window, then click Submit there yourself."
+                    )
+                    if st.button("✅ I Submitted This — Close Browser", key=f"confirm_{job['id']}", type="primary"):
+                        close_browser_session(session)
+                        confirm_submitted(job["id"])
+                        del st.session_state.browser_sessions[job["id"]]
+                        st.toast(f"Marked as Applied: {job['role']}")
+                        st.rerun()
+
+
+
+def render_action_required():
+    st.header("Action Required")
+    st.caption("Jobs the pipeline couldn't handle automatically — an evaluator hiccup, or a form the browser agent couldn't confidently fill after repeated tries.")
+
+    flagged = get_jobs(status="Needs Consultation")
+    if not flagged:
+        st.info("Nothing needs your attention right now.")
+        return
+
+    for job in flagged:
+        with st.container(border=True):
+            st.markdown(f"**{job['role']}** at **{job['company']}**")
+            st.caption(f"Retry count: {job['retry_count']}")
+            st.markdown(f"[View listing]({job['job_url']})")
+            col1, col2 = st.columns(2)
+            if col1.button("🔁 Retry", key=f"retry_{job['id']}", use_container_width=True):
+                update_job_status(job["id"], "Pending")
+                st.toast("Reset to Pending — will reappear in the Studio.")
+                st.rerun()
+            if col2.button("🚫 Give Up On This One", key=f"giveup_{job['id']}", use_container_width=True):
+                update_job_status(job["id"], "Dead")
+                st.toast("Marked as Dead.")
+                st.rerun()
 
 tab_dashboard, tab_settings, tab_sourcing, tab_studio, tab_anomalies = st.tabs([
     "📊 Dashboard & Analytics",
@@ -332,4 +406,4 @@ with tab_studio:
     render_asset_studio()
 
 with tab_anomalies:
-    st.info("Coming in Week 4: browser agent anomalies flagged for manual review.")
+    render_action_required()
