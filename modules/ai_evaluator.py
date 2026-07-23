@@ -87,9 +87,10 @@ def run_sourcing_pipeline(candidates: list[dict]) -> dict:
                 role=job["role"],
                 job_url=job["job_url"],
                 job_description=job["job_description"],
+                job_source=job.get("job_source"),
+                search_profile=job.get("search_profile"),
             )
             update_job_status(job_id, "Needs Consultation")
-            counts["needs_consultation"] += 1
 
         elif result["decision"] == "NO-GO":
             log_activity(
@@ -106,6 +107,8 @@ def run_sourcing_pipeline(candidates: list[dict]) -> dict:
                 job_description=job["job_description"],
                 match_score=result["match_score"],
                 evaluator_reason=result["reason"],
+                job_source=job.get("job_source"),
+                search_profile=job.get("search_profile"),
             )
 
             if result["match_score"] >= threshold:

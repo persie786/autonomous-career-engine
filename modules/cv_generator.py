@@ -3,8 +3,19 @@ import os
 from google import genai
 from google.genai import types
 from docx import Document
+from modules.ats_scorer import score_job_against_persona
+from database.db_handler import (
+    get_persona_for_company,
+    save_generated_assets,
+    log_activity,
+    update_ats_score,
+)
 
-from database.db_handler import get_persona_for_company, save_generated_assets, log_activity
+from database.db_handler import (
+    get_persona_for_company,
+    save_generated_assets,
+    log_activity,
+)
 from modules.persona_builder import get_persona
 from utils.logger import setup_logger
 from utils.ai_router import generate_json
@@ -14,7 +25,6 @@ logger = setup_logger("cv_generator")
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TEMPLATE_PATH = os.path.join(PROJECT_ROOT, "templates", "master_cv.docx")
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, "data", "generated_cvs")
-
 
 
 GENERATION_PROMPT = """You are tailoring a candidate's CV and writing a cover letter for one \
@@ -37,19 +47,42 @@ Return ONLY valid JSON in exactly this shape:
 }}"""
 
 
-def choose_persona_for_job(company: str, fallback_name: str = "default") -> tuple[str, dict]:
-    """Applies the Company Consistency Guardrail before anything else runs."""
-    forced_name = get_persona_for_company(company)
-    persona_name = forced_name or fallback_name
-    persona = get_persona(persona_name)
+def choose_persona_for_job(job: dict) -> tuple[str, dict]:
+    """
+    Tries, in order: the persona forced by the Consistency Guardrail (same
+    company applied to before), then the persona for this job's search
+    profile, then the manually-built 'default' persona. Only raises if none
+    of the three exist — a missing or not-yet-created per-profile persona
+    falls through instead of hard-failing.
+    """
+    tried = []
 
+    forced_name = get_persona_for_company(job["company"])
     if forced_name:
-        logger.info(f"Consistency Guardrail: reusing persona '{forced_name}' for {company}")
+        persona = get_persona(forced_name)
+        if persona:
+            logger.info(
+                f"Consistency Guardrail: reusing persona '{forced_name}' for {job['company']}"
+            )
+            return forced_name, persona
+        tried.append(f"company-forced '{forced_name}'")
 
-    if persona is None:
-        raise ValueError(f"Persona '{persona_name}' not found — build one in Settings first.")
+    profile_name = job.get("search_profile")
+    if profile_name:
+        persona = get_persona(profile_name)
+        if persona:
+            return profile_name, persona
+        tried.append(f"profile '{profile_name}'")
 
-    return persona_name, persona
+    persona = get_persona("default")
+    if persona:
+        return "default", persona
+    tried.append("'default'")
+
+    raise ValueError(
+        f"No persona found for {job['company']} — tried {', '.join(tried)}. "
+        "Build a persona in Settings first."
+    )
 
 
 def generate_application_assets(job: dict, persona: dict) -> dict:
@@ -72,7 +105,7 @@ def _replace_tag(doc: Document, tag: str, replacement_text: str) -> bool:
         if tag in paragraph.text:
             style = paragraph.style
             anchor = paragraph._p
-            for line in (replacement_text.split("\n") or [""]):
+            for line in replacement_text.split("\n") or [""]:
                 new_para = doc.add_paragraph(line, style=style)
                 anchor.addnext(new_para._p)
                 anchor = new_para._p
@@ -113,10 +146,16 @@ def generate_for_job(job: dict) -> dict:
             "build_docx() to a real Word document at that path first."
         )
 
-    persona_name, persona = choose_persona_for_job(job["company"])
+    persona_name, persona = choose_persona_for_job(job)
+    ats_result = score_job_against_persona(job["job_description"], persona)
+    update_ats_score(
+        job["id"], ats_result["total"], ats_result["matched"], ats_result["missing"]
+    )
     assets = generate_application_assets(job, persona)
 
-    safe_company = "".join(c for c in job["company"] if c.isalnum() or c in " -_").strip()
+    safe_company = "".join(
+        c for c in job["company"] if c.isalnum() or c in " -_"
+    ).strip()
     output_path = os.path.join(OUTPUT_DIR, f"CV_{safe_company}_{job['id']}.docx")
     build_docx(persona, assets, output_path)
 
@@ -128,7 +167,9 @@ def generate_for_job(job: dict) -> dict:
         docx_path=output_path,
     )
 
-    logger.info(f"Generated assets for job id={job['id']} ({job['role']} at {job['company']})")
+    logger.info(
+        f"Generated assets for job id={job['id']} ({job['role']} at {job['company']})"
+    )
     return {"persona_used": persona_name, "docx_path": output_path, **assets}
 
 

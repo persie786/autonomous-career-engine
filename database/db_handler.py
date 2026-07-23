@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from cryptography.fernet import Fernet
 from utils.logger import setup_logger
 import json
+import re
 
 load_dotenv()
 logger = setup_logger("db_handler")
@@ -64,7 +65,13 @@ def init_db():
         "generated_cv": "TEXT",
         "generated_cover_letter": "TEXT",
         "cv_approved_at": "TEXT",
+        "job_source": "TEXT",  # which site JobSpy found this on
+        "search_profile": "TEXT",  # which profile ran the search that found it
         "docx_path": "TEXT",
+        "ats_keywords_total": "INTEGER",
+        "ats_keywords_matched": "INTEGER",
+        "ats_missing_keywords": "TEXT",
+        "referral_contact": "TEXT",
     }
     for col_name, col_type in new_columns.items():
         if col_name not in existing_columns:
@@ -164,13 +171,16 @@ def add_job(
     match_score=None,
     persona_used=None,
     evaluator_reason=None,
+    job_source=None,
+    search_profile=None,
 ) -> int:
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
         """
-        INSERT INTO jobs (company, role, job_url, job_description, match_score, persona_used, evaluator_reason)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO jobs (company, role, job_url, job_description, match_score, persona_used,
+                          evaluator_reason, job_source, search_profile)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     """,
         (
             company,
@@ -180,6 +190,8 @@ def add_job(
             match_score,
             persona_used,
             evaluator_reason,
+            job_source,
+            search_profile,
         ),
     )
     conn.commit()
@@ -187,6 +199,14 @@ def add_job(
     conn.close()
     log_activity("db_handler", f"Added job: {role} at {company} (id={job_id})")
     return job_id
+
+
+def update_job_notes(job_id: int, notes: str):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE jobs SET notes = ? WHERE id = ?", (notes, job_id))
+    conn.commit()
+    conn.close()
 
 
 def update_job_status(job_id: int, new_status: str):
@@ -364,13 +384,19 @@ def get_company_history(company: str, exclude_job_id: int = None) -> list[dict]:
     conn.close()
     return [dict(row) for row in rows]
 
+
 def get_jobs_in_period(date_field: str, start: str, end: str) -> list[dict]:
-    if date_field not in ("date_added", "date_applied"):  # whitelisted — never interpolate raw column names
+    if date_field not in (
+        "date_added",
+        "date_applied",
+    ):  # whitelisted — never interpolate raw column names
         raise ValueError("Invalid date_field")
     conn = get_connection()
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    cursor.execute(f"SELECT * FROM jobs WHERE {date_field} BETWEEN ? AND ?", (start, end))
+    cursor.execute(
+        f"SELECT * FROM jobs WHERE {date_field} BETWEEN ? AND ?", (start, end)
+    )
     rows = cursor.fetchall()
     conn.close()
     return [dict(row) for row in rows]
@@ -385,7 +411,9 @@ def get_status_counts() -> dict:
     return counts
 
 
-def save_weekly_report(period_start: str, period_end: str, stats: dict, summary_text: str) -> int:
+def save_weekly_report(
+    period_start: str, period_end: str, stats: dict, summary_text: str
+) -> int:
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
@@ -395,7 +423,10 @@ def save_weekly_report(period_start: str, period_end: str, stats: dict, summary_
     conn.commit()
     report_id = cursor.lastrowid
     conn.close()
-    log_activity("report_generator", f"Weekly report generated for {period_start} to {period_end}")
+    log_activity(
+        "report_generator",
+        f"Weekly report generated for {period_start} to {period_end}",
+    )
     return report_id
 
 
@@ -403,7 +434,172 @@ def get_weekly_reports(limit: int = 10) -> list[dict]:
     conn = get_connection()
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM weekly_reports ORDER BY generated_at DESC LIMIT ?", (limit,))
+    cursor.execute(
+        "SELECT * FROM weekly_reports ORDER BY generated_at DESC LIMIT ?", (limit,)
+    )
     rows = cursor.fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+
+def update_ats_score(
+    job_id: int, total: int, matched: int, missing_keywords: list[str]
+):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE jobs SET ats_keywords_total = ?, ats_keywords_matched = ?, ats_missing_keywords = ? WHERE id = ?",
+        (total, matched, json.dumps(missing_keywords), job_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_referral_contact(job_id: int, contact: str):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE jobs SET referral_contact = ? WHERE id = ?", (contact, job_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_referral_contact_for_company(company: str) -> str | None:
+    """Mirrors get_persona_for_company's lookup pattern — if you've already
+    recorded a contact at this company, new jobs there can surface it."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT referral_contact FROM jobs WHERE LOWER(company) = LOWER(?) "
+        "AND referral_contact IS NOT NULL AND referral_contact != '' LIMIT 1",
+        (company,),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+_TITLE_STOPWORDS = {
+    "the",
+    "a",
+    "an",
+    "of",
+    "and",
+    "or",
+    "for",
+    "to",
+    "in",
+    "on",
+    "at",
+    "is",
+    "i",
+    "ii",
+    "iii",
+    "sr",
+    "sr.",
+    "jr",
+    "jr.",
+    "senior",
+    "junior",
+    "remote",
+    "hybrid",
+    "onsite",
+}
+
+
+def _normalize_title_tokens(title: str) -> set:
+    cleaned = re.sub(r"[^\w\s]", " ", title.lower())
+    return {t for t in cleaned.split() if t and t not in _TITLE_STOPWORDS}
+
+
+def find_similar_jobs(
+    company: str, role: str, exclude_job_id: int = None, threshold: float = 0.55
+) -> list[dict]:
+    """
+    Token-overlap similarity against every prior job at the same company —
+    deliberately not an AI call. This needs to be explainable (which words
+    overlapped) and fast enough to run on every manual add and every Studio
+    card, and a plain Jaccard score does that without another API round-trip.
+    """
+    candidate_tokens = _normalize_title_tokens(role)
+    if not candidate_tokens:
+        return []
+    history = get_company_history(company, exclude_job_id=exclude_job_id)
+    matches = []
+    for h in history:
+        h_tokens = _normalize_title_tokens(h["role"])
+        if not h_tokens:
+            continue
+        union = candidate_tokens | h_tokens
+        similarity = len(candidate_tokens & h_tokens) / len(union) if union else 0
+        if similarity >= threshold:
+            matches.append({**h, "similarity": similarity})
+    return sorted(matches, key=lambda x: -x["similarity"])
+
+
+def get_skill_gap_summary(top_n: int = 15) -> list[tuple]:
+    """Tallies every keyword ever flagged missing across every generated CV —
+    this is what turns one job's ATS score into a pattern worth acting on."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT ats_missing_keywords FROM jobs WHERE ats_missing_keywords IS NOT NULL"
+    )
+    rows = cursor.fetchall()
+    conn.close()
+
+    counts = {}
+    for (raw,) in rows:
+        try:
+            keywords = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        for kw in keywords:
+            key = kw.strip().lower()
+            if key:
+                counts[key] = counts.get(key, 0) + 1
+    return sorted(counts.items(), key=lambda x: -x[1])[:top_n]
+
+
+def get_company_summary() -> list[dict]:
+    conn = get_connection()
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT company, COUNT(*) as total_jobs,
+               SUM(CASE WHEN date_applied IS NOT NULL THEN 1 ELSE 0 END) as applied_count,
+               SUM(CASE WHEN status = 'Interview' THEN 1 ELSE 0 END) as interview_count,
+               MAX(persona_used) as persona_used, MAX(referral_contact) as referral_contact,
+               MAX(date_added) as latest_activity
+        FROM jobs GROUP BY LOWER(company) ORDER BY latest_activity DESC
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def get_profile_performance_summary() -> list[dict]:
+    conn = get_connection()
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT COALESCE(search_profile, 'Manual / Unknown') as search_profile,
+               COUNT(*) as total_jobs,
+               SUM(CASE WHEN date_applied IS NOT NULL THEN 1 ELSE 0 END) as applied_count,
+               SUM(CASE WHEN status = 'Interview' THEN 1 ELSE 0 END) as interview_count,
+               ROUND(AVG(match_score), 2) as avg_match_score
+        FROM jobs GROUP BY search_profile ORDER BY total_jobs DESC
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def delete_job(job_id: int):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+    conn.commit()
+    conn.close()
+    log_activity("db_handler", f"Job id={job_id} deleted.")

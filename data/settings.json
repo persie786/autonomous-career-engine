@@ -4,5 +4,5 @@
     "web3",
     "commission-only"
   ],
-  "confidence_threshold": 0.2
+  "confidence_threshold": 0.45
 }
