@@ -20,17 +20,15 @@ def extract_keywords(job_description: str) -> list[str]:
     return json.loads(raw_text).get("keywords", [])
 
 
-def score_job_against_persona(job_description: str, persona: dict) -> dict:
-    """
-    Keyword extraction is the one AI call; whether each keyword literally
-    appears in the persona is a plain substring check after that — kept
-    deterministic on purpose, so the score is explainable (you can see
-    exactly which words were checked) rather than another opaque judgment.
-    """
-    keywords = extract_keywords(job_description)
-    if not keywords:
-        return {"total": 0, "matched": 0, "missing": []}
+def _text_contains(haystack: str, keywords: list[str]) -> tuple[list, list]:
+    haystack_lower = haystack.lower()
+    matched = [kw for kw in keywords if kw.lower() in haystack_lower]
+    missing = [kw for kw in keywords if kw.lower() not in haystack_lower]
+    return matched, missing
 
+
+def score_persona_against_keywords(keywords: list[str], persona: dict) -> dict:
+    """The 'before' score — checks the static persona, before generation."""
     haystack = " ".join(
         [
             persona.get("summary", ""),
@@ -41,8 +39,13 @@ def score_job_against_persona(job_description: str, persona: dict) -> dict:
                 for b in exp.get("bullets", [])
             ),
         ]
-    ).lower()
+    )
+    matched, missing = _text_contains(haystack, keywords)
+    return {"total": len(keywords), "matched": len(matched), "missing": missing}
 
-    matched = [kw for kw in keywords if kw.lower() in haystack]
-    missing = [kw for kw in keywords if kw.lower() not in haystack]
+
+def score_text_against_keywords(keywords: list[str], text: str) -> dict:
+    """The 'after' score — checks whatever text was actually generated. This
+    is the one that gets saved, since it reflects what you're really submitting."""
+    matched, missing = _text_contains(text, keywords)
     return {"total": len(keywords), "matched": len(matched), "missing": missing}

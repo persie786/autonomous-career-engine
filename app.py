@@ -30,10 +30,18 @@ from database.db_handler import (
     get_company_summary,
     get_profile_performance_summary,
     delete_job,
+    get_all_generated_assets,
+    clear_generated_assets,
 )
 from modules.scraper import source_jobs
 from modules.ai_evaluator import run_sourcing_pipeline
-from modules.persona_builder import build_persona, get_persona, load_personas
+from modules.persona_builder import (
+    build_persona,
+    get_persona,
+    load_personas,
+    delete_persona,
+    polish_career_summary,
+)
 from modules.cv_generator import generate_for_job
 from modules.browser_agent import (
     prepare_application,
@@ -58,6 +66,11 @@ from utils.search_profiles import (
 )
 from utils.logger import setup_logger
 from utils.theme import CUSTOM_CSS, render_kpi_row, status_badge, job_card_header
+from utils.user_profile import (
+    save_user_profile,
+    load_user_profile,
+)
+from modules.persona_builder import create_persona_variant
 
 load_dotenv()
 logger = setup_logger("app")
@@ -167,6 +180,7 @@ if "personas_ensured_this_session" not in st.session_state:
 PAGES = [
     ("dashboard", "Dashboard", "📊"),
     ("overview", "Overview & Data", "🗂️"),
+    ("profile", "Profile", "👤"),
     ("settings", "Settings & Guardrails", "⚙️"),
     ("sourcing", "Sourcing Queue", "🔍"),
     ("studio", "Live Asset Studio", "📝"),
@@ -389,7 +403,7 @@ def render_settings():
 
     st.subheader("Personas")
     st.caption(
-        "Auto-created per search profile below. 'default' covers manually-added jobs and any profile-less fallback."
+        "Auto-created per search profile. 'default' covers manually-added jobs and any profile-less fallback."
     )
     personas = load_personas()
     if not personas:
@@ -406,7 +420,12 @@ def render_settings():
                     st.caption(
                         f"{exp.get('title', '')} at {exp.get('company', '')} ({exp.get('dates', '')})"
                     )
-                if st.button("🔄 Regenerate from current resume", key=f"regen_{name}"):
+                col1, col2 = st.columns(2)
+                if col1.button(
+                    "🔄 Regenerate from resume",
+                    key=f"regen_{name}",
+                    use_container_width=True,
+                ):
                     if not os.path.exists(resume_path):
                         st.error("No base resume on file to regenerate from.")
                     else:
@@ -414,7 +433,55 @@ def render_settings():
                             build_persona(name=name)
                             st.toast(f"Persona '{name}' regenerated.")
                             st.rerun()
+                if col2.button(
+                    "🗑️ Delete", key=f"delpersona_{name}", use_container_width=True
+                ):
+                    delete_persona(name)
+                    st.toast(f"Deleted persona '{name}'.")
+                    st.rerun()
 
+    with st.expander("➕ Add / Create Persona"):
+        tab_fresh, tab_ai = st.tabs(["From Resume", "AI Variant"])
+        with tab_fresh:
+            with st.form("new_persona_fresh", clear_on_submit=True):
+                np_name = st.text_input("Persona name")
+                if st.form_submit_button("Build from Resume"):
+                    if not np_name.strip():
+                        st.warning("Name it first.")
+                    elif not os.path.exists(resume_path):
+                        st.error("No resume uploaded.")
+                    else:
+                        build_persona(name=np_name.strip())
+                        st.toast(f"Persona '{np_name.strip()}' built.")
+                        st.rerun()
+        with tab_ai:
+            with st.form("new_persona_variant", clear_on_submit=True):
+                base_choice = st.selectbox(
+                    "Base persona to build from",
+                    list(personas.keys()) if personas else [],
+                )
+                variant_name = st.text_input("New persona name")
+                instruction = st.text_area(
+                    "Describe the angle",
+                    placeholder="e.g. Emphasize backend and distributed systems work, downplay frontend",
+                )
+                if st.form_submit_button("✨ Generate Variant"):
+                    if not (
+                        base_choice and variant_name.strip() and instruction.strip()
+                    ):
+                        st.warning("Fill in all three fields.")
+                    else:
+                        with st.spinner("Generating persona variant..."):
+                            try:
+                                create_persona_variant(
+                                    base_choice,
+                                    variant_name.strip(),
+                                    instruction.strip(),
+                                )
+                                st.toast(f"Variant '{variant_name.strip()}' created.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Failed: {e}")
     st.subheader("Search Profiles")
     st.caption(
         "Fully independent scrape configs. 'Trigger JobSpy' in the Sourcing Queue runs every active one below, in one click."
@@ -726,6 +793,19 @@ def render_asset_studio():
     st.caption(
         "Review and approve the tailored CV and cover letter before anything gets submitted."
     )
+    all_generated = get_all_generated_assets()
+    ats_scored = [j for j in all_generated if j.get("ats_keywords_total")]
+    avg_match = None
+    scored_matches = [
+        j["match_score"] for j in all_generated if j.get("match_score") is not None
+    ]
+    if scored_matches:
+        avg_match = sum(scored_matches) / len(scored_matches)
+    avg_ats = None
+    if ats_scored:
+        avg_ats = sum(
+            j["ats_keywords_matched"] / j["ats_keywords_total"] for j in ats_scored
+        ) / len(ats_scored)
 
     jobs = get_jobs(status="Pending")
     needs_generation = [j for j in jobs if not j.get("generated_cv")]
@@ -733,6 +813,37 @@ def render_asset_studio():
         j for j in jobs if j.get("generated_cv") and not j.get("cv_approved_at")
     ]
     approved = [j for j in jobs if j.get("cv_approved_at")]
+
+    st.html(
+        render_kpi_row(
+            [
+                {
+                    "label": "Ready to Generate",
+                    "value": str(len(needs_generation)),
+                    "delta": None,
+                    "primary": False,
+                },
+                {
+                    "label": "Awaiting Review",
+                    "value": str(len(needs_review)),
+                    "delta": None,
+                    "primary": True,
+                },
+                {
+                    "label": "Avg Match Score",
+                    "value": f"{avg_match:.0%}" if avg_match is not None else "—",
+                    "delta": None,
+                    "primary": False,
+                },
+                {
+                    "label": "Avg ATS Keywords",
+                    "value": f"{avg_ats:.0%}" if avg_ats is not None else "—",
+                    "delta": None,
+                    "primary": False,
+                },
+            ]
+        )
+    )
 
     if not jobs:
         st.info(
@@ -922,6 +1033,44 @@ def render_asset_studio():
                         st.rerun()
                 render_notes_field(job, "studio_approved")
                 render_referral_field(job, "studio_approved")
+
+    st.subheader("📁 All Generated CVs")
+    st.caption(
+        "Every CV ever generated, regardless of current status — download, or clear to regenerate from scratch."
+    )
+    if not all_generated:
+        st.info("None generated yet.")
+    else:
+        for job in all_generated:
+            with st.container(key=f"card_cvlib_{job['id']}"):
+                st.html(
+                    job_card_header(
+                        job["role"],
+                        job["company"],
+                        job["status"],
+                        job.get("match_score"),
+                        job.get("job_source", "unknown"),
+                    )
+                )
+                col1, col2 = st.columns(2)
+                docx_path = job.get("docx_path")
+                if docx_path and os.path.exists(docx_path):
+                    with open(docx_path, "rb") as f:
+                        col1.download_button(
+                            "⬇️ Download",
+                            data=f.read(),
+                            file_name=os.path.basename(docx_path),
+                            key=f"dl_lib_{job['id']}",
+                            use_container_width=True,
+                        )
+                if col2.button(
+                    "🗑️ Delete & Reset",
+                    key=f"clear_{job['id']}",
+                    use_container_width=True,
+                ):
+                    clear_generated_assets(job["id"])
+                    st.toast("Cleared — will reappear under 'Ready to Generate'.")
+                    st.rerun()
 
 
 # =========================================================================
@@ -1219,10 +1368,85 @@ def render_overview():
         )
 
 
+def render_profile():
+    st.title("Profile")
+    st.caption(
+        "Everything the pipeline knows about you outside your resume-based personas — feeds into cover letters and generated documents."
+    )
+
+    profile = load_user_profile()
+
+    with st.container(key="glass_profile_form"):
+        with st.form("user_profile_form"):
+            col1, col2 = st.columns(2)
+            full_name = col1.text_input("Full Name", value=profile["full_name"])
+            email = col2.text_input("Email", value=profile["email"])
+            phone = col1.text_input("Phone", value=profile["phone"])
+            location = col2.text_input("Location", value=profile["location"])
+            linkedin_url = col1.text_input(
+                "LinkedIn URL", value=profile["linkedin_url"]
+            )
+            portfolio_url = col2.text_input(
+                "Portfolio URL", value=profile["portfolio_url"]
+            )
+            github_url = col1.text_input("GitHub URL", value=profile["github_url"])
+            work_authorization = col2.text_input(
+                "Work Authorization",
+                value=profile["work_authorization"],
+                placeholder="e.g. Authorized to work in Pakistan",
+            )
+            notice_period = col1.text_input(
+                "Notice Period",
+                value=profile["notice_period"],
+                placeholder="e.g. 2 weeks",
+            )
+            desired_salary_range = col2.text_input(
+                "Desired Salary Range", value=profile["desired_salary_range"]
+            )
+            career_summary = st.text_area(
+                "Career Summary", value=profile["career_summary"], height=120
+            )
+
+            if st.form_submit_button("💾 Save Profile"):
+                save_user_profile(
+                    {
+                        "full_name": full_name,
+                        "email": email,
+                        "phone": phone,
+                        "location": location,
+                        "linkedin_url": linkedin_url,
+                        "portfolio_url": portfolio_url,
+                        "github_url": github_url,
+                        "work_authorization": work_authorization,
+                        "notice_period": notice_period,
+                        "desired_salary_range": desired_salary_range,
+                        "career_summary": career_summary,
+                    }
+                )
+                st.toast("Profile saved.")
+                st.rerun()
+
+    if st.button("✨ Improve Career Summary with AI"):
+        default_persona = get_persona("default")
+        background = ""
+        if default_persona:
+            background = f"{default_persona.get('summary', '')} Skills: {', '.join(default_persona.get('skills', []))}"
+        with st.spinner("Polishing..."):
+            try:
+                improved = polish_career_summary(profile["career_summary"], background)
+                profile["career_summary"] = improved
+                save_user_profile(profile)
+                st.toast("Summary improved.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"AI polish failed: {e}")
+
+
 # ---------- Router ----------
 PAGE_RENDERERS = {
     "dashboard": render_dashboard,
     "overview": render_overview,
+    "profile": render_profile,
     "settings": render_settings,
     "sourcing": render_sourcing_queue,
     "studio": render_asset_studio,

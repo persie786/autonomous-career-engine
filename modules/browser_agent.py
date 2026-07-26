@@ -22,6 +22,21 @@ FIELD_MAP = [
 ]
 
 
+def _find_chrome_executable() -> str | None:
+    """Locates your actual installed Chrome directly, rather than trusting
+    Playwright's channel resolution to find it — removes any ambiguity
+    about whether a Playwright-managed copy gets used instead."""
+    candidates = [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return None
+
+
 def _try_fill_text_field(page, keywords: list[str], value: str) -> bool:
     if not value:
         return False
@@ -35,7 +50,9 @@ def _try_fill_text_field(page, keywords: list[str], value: str) -> bool:
             pass
         for attr in ("placeholder", "name", "id"):
             try:
-                locator = page.locator(f'input[{attr}*="{keyword}" i], textarea[{attr}*="{keyword}" i]')
+                locator = page.locator(
+                    f'input[{attr}*="{keyword}" i], textarea[{attr}*="{keyword}" i]'
+                )
                 if locator.count() > 0:
                     locator.first.fill(value)
                     return True
@@ -47,7 +64,12 @@ def _try_fill_text_field(page, keywords: list[str], value: str) -> bool:
 def _try_fill_cover_letter(page, text: str) -> bool:
     if not text:
         return False
-    for keyword in ["cover letter", "why do you want", "message to hiring", "additional information"]:
+    for keyword in [
+        "cover letter",
+        "why do you want",
+        "message to hiring",
+        "additional information",
+    ]:
         try:
             locator = page.get_by_label(re.compile(keyword, re.IGNORECASE))
             if locator.count() > 0:
@@ -87,21 +109,43 @@ def prepare_application(job: dict, headless: bool = False) -> dict:
     filled, skipped = [], []
 
     playwright = sync_playwright().start()
-    context = playwright.chromium.launch_persistent_context(USER_DATA_DIR, headless=headless)
+    chrome_path = _find_chrome_executable()
+    launch_kwargs = {"headless": headless}
+    if chrome_path:
+        launch_kwargs["executable_path"] = chrome_path
+        logger.info(f"Launching real Chrome at: {chrome_path}")
+    else:
+        launch_kwargs["channel"] = "chrome"
+        logger.warning(
+            "Real Chrome not found at standard install paths — falling back to Playwright's channel resolution."
+        )
+    context = playwright.chromium.launch_persistent_context(
+        USER_DATA_DIR, **launch_kwargs
+    )
     page = context.new_page()
 
     try:
         page.goto(job["job_url"], timeout=30000)
         page.wait_for_load_state("networkidle", timeout=15000)
     except PlaywrightTimeoutError:
-        logger.warning(f"Page load timed out for job id={job['id']} — filling whatever loaded so far.")
+        logger.warning(
+            f"Page load timed out for job id={job['id']} — filling whatever loaded so far."
+        )
 
     for persona_key, keywords in FIELD_MAP:
         value = persona.get(persona_key, "")
-        (filled if _try_fill_text_field(page, keywords, value) else skipped).append(persona_key)
+        (filled if _try_fill_text_field(page, keywords, value) else skipped).append(
+            persona_key
+        )
 
-    (filled if _try_fill_cover_letter(page, job.get("generated_cover_letter", "")) else skipped).append("cover_letter")
-    (filled if _try_upload_resume(page, job.get("docx_path")) else skipped).append("resume_upload")
+    (
+        filled
+        if _try_fill_cover_letter(page, job.get("generated_cover_letter", ""))
+        else skipped
+    ).append("cover_letter")
+    (filled if _try_upload_resume(page, job.get("docx_path")) else skipped).append(
+        "resume_upload"
+    )
 
     # Field Memory Cache: reuse answers to custom questions seen on prior
     # applications. Anything new is left for you to answer by hand below.
@@ -120,7 +164,13 @@ def prepare_application(job: dict, headless: bool = False) -> dict:
         f"needs your attention [{', '.join(skipped) or 'none'}].",
     )
 
-    return {"filled": filled, "skipped": skipped, "playwright": playwright, "context": context, "page": page}
+    return {
+        "filled": filled,
+        "skipped": skipped,
+        "playwright": playwright,
+        "context": context,
+        "page": page,
+    }
 
 
 def close_browser_session(session: dict):
@@ -145,14 +195,29 @@ def mark_prep_failed(job_id: int, retry_count: int):
     new_count = retry_count + 1
 
     if new_count >= MAX_RETRIES:
-        cursor.execute("UPDATE jobs SET status = 'Needs Consultation', retry_count = ? WHERE id = ?", (new_count, job_id))
-        log_activity("browser_agent", f"Job id={job_id} failed prep {new_count}x — routed to Needs Consultation.")
-    else:
-        cursor.execute("UPDATE jobs SET status = 'Failed - Retry', retry_count = ? WHERE id = ?", (new_count, job_id))
-        log_activity("browser_agent", f"Job id={job_id} prep failed (attempt {new_count}/{MAX_RETRIES}).")
+        cursor.execute(
+            "UPDATE jobs SET status = 'Needs Consultation', retry_count = ? WHERE id = ?",
+            (new_count, job_id),
+        )
+        conn.commit()
+        conn.close()  # Close the lock FIRST
 
-    conn.commit()
-    conn.close()
+        log_activity(
+            "browser_agent",
+            f"Job id={job_id} failed prep {new_count}x — routed to Needs Consultation.",
+        )
+    else:
+        cursor.execute(
+            "UPDATE jobs SET status = 'Failed - Retry', retry_count = ? WHERE id = ?",
+            (new_count, job_id),
+        )
+        conn.commit()
+        conn.close()  # Close the lock FIRST
+
+        log_activity(
+            "browser_agent",
+            f"Job id={job_id} prep failed (attempt {new_count}/{MAX_RETRIES}).",
+        )
 
 
 def confirm_submitted(job_id: int):

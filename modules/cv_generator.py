@@ -3,7 +3,11 @@ import os
 from google import genai
 from google.genai import types
 from docx import Document
-from modules.ats_scorer import score_job_against_persona
+from modules.ats_scorer import (
+    extract_keywords,
+    score_persona_against_keywords,
+    score_text_against_keywords,
+)
 from database.db_handler import (
     get_persona_for_company,
     save_generated_assets,
@@ -19,6 +23,12 @@ from database.db_handler import (
 from modules.persona_builder import get_persona
 from utils.logger import setup_logger
 from utils.ai_router import generate_json
+from modules.ats_scorer import (
+    extract_keywords,
+    score_persona_against_keywords,
+    score_text_against_keywords,
+)
+from utils.user_profile import load_user_profile
 
 logger = setup_logger("cv_generator")
 
@@ -39,12 +49,47 @@ Company: {company}
 Description:
 {description}
 
+{keyword_guidance}
+
+{profile_extras}
+
 Return ONLY valid JSON in exactly this shape:
 {{
   "tailored_summary": "a 2-3 sentence summary emphasizing fit for THIS role, based only on the persona's real background",
   "tailored_experience": "one line per bullet across all relevant experience entries, each prefixed with '- ', emphasizing points relevant to this role — never invent experience not present in the persona",
   "cover_letter": "a complete 3-4 paragraph cover letter for this specific role and company"
 }}"""
+
+
+def _build_keyword_guidance(missing_keywords: list[str]) -> str:
+    if not missing_keywords:
+        return ""
+    kw_list = ", ".join(missing_keywords)
+    return (
+        f"This ATS scan flagged these keywords as absent from the candidate's background: {kw_list}. "
+        f"Where the candidate's real, given experience genuinely supports one of these exact terms "
+        f"(e.g. equivalent or adjacent work, just described differently), naturally work that precise "
+        f"wording into the summary or experience bullets. Do NOT claim any skill, tool, or experience "
+        f"not evidenced in the persona above — if a keyword has no real basis, leave it out rather than fabricate it."
+    )
+
+
+def _build_profile_extras(profile: dict) -> str:
+    lines = []
+    if profile.get("work_authorization"):
+        lines.append(f"Work authorization: {profile['work_authorization']}")
+    if profile.get("notice_period"):
+        lines.append(f"Notice period: {profile['notice_period']}")
+    if profile.get("linkedin_url"):
+        lines.append(f"LinkedIn: {profile['linkedin_url']}")
+    if profile.get("portfolio_url"):
+        lines.append(f"Portfolio: {profile['portfolio_url']}")
+    if not lines:
+        return ""
+    return (
+        "Additional candidate context (mention only where it naturally fits, don't force it in):\n"
+        + "\n".join(lines)
+    )
 
 
 def choose_persona_for_job(job: dict) -> tuple[str, dict]:
@@ -85,13 +130,18 @@ def choose_persona_for_job(job: dict) -> tuple[str, dict]:
     )
 
 
-def generate_application_assets(job: dict, persona: dict) -> dict:
-    """Calls Gemini to produce tailored CV content and a cover letter for one job."""
+def generate_application_assets(
+    job: dict, persona: dict, missing_keywords: list[str] = None
+) -> dict:
+    keyword_guidance = _build_keyword_guidance(missing_keywords or [])
+    profile_extras = _build_profile_extras(load_user_profile())
     prompt = GENERATION_PROMPT.format(
         persona_json=json.dumps(persona, indent=2),
         role=job["role"],
         company=job["company"],
         description=job["job_description"][:4000],
+        keyword_guidance=keyword_guidance,
+        profile_extras=profile_extras,
     )
     raw_text, model_used = generate_json("", prompt, temperature=0.4)
     logger.info(f"Assets for job id={job['id']} generated via {model_used}")
@@ -114,13 +164,16 @@ def _replace_tag(doc: Document, tag: str, replacement_text: str) -> bool:
     return False
 
 
-def build_docx(persona: dict, assets: dict, output_path: str):
+def build_docx(
+    persona: dict, assets: dict, output_path: str, user_profile: dict = None
+):
+    user_profile = user_profile or {}
     doc = Document(TEMPLATE_PATH)
 
     tags = {
-        "{{FULL_NAME}}": persona.get("full_name", ""),
-        "{{EMAIL}}": persona.get("email", ""),
-        "{{PHONE}}": persona.get("phone", ""),
+        "{{FULL_NAME}}": user_profile.get("full_name") or persona.get("full_name", ""),
+        "{{EMAIL}}": user_profile.get("email") or persona.get("email", ""),
+        "{{PHONE}}": user_profile.get("phone") or persona.get("phone", ""),
         "{{SUMMARY}}": assets["tailored_summary"],
         "{{SKILLS}}": ", ".join(persona.get("skills", [])),
         "{{EXPERIENCE}}": assets["tailored_experience"],
@@ -129,17 +182,14 @@ def build_docx(persona: dict, assets: dict, output_path: str):
             for e in persona.get("education", [])
         ),
     }
-
     for tag, value in tags.items():
         if not _replace_tag(doc, tag, value):
             logger.warning(f"Tag {tag} not found in template — check master_cv.docx.")
-
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     doc.save(output_path)
 
 
 def generate_for_job(job: dict) -> dict:
-    """Full pipeline for one job — this is what the Live Asset Studio calls."""
     if not os.path.exists(TEMPLATE_PATH):
         raise FileNotFoundError(
             "templates/master_cv.docx doesn't exist — add the {{TAGS}} listed in "
@@ -147,17 +197,34 @@ def generate_for_job(job: dict) -> dict:
         )
 
     persona_name, persona = choose_persona_for_job(job)
-    ats_result = score_job_against_persona(job["job_description"], persona)
-    update_ats_score(
-        job["id"], ats_result["total"], ats_result["matched"], ats_result["missing"]
-    )
-    assets = generate_application_assets(job, persona)
 
+    keywords = extract_keywords(job["job_description"])
+    initial_score = (
+        score_persona_against_keywords(keywords, persona)
+        if keywords
+        else {"total": 0, "matched": 0, "missing": []}
+    )
+
+    assets = generate_application_assets(
+        job, persona, missing_keywords=initial_score["missing"]
+    )
+
+    generated_blob = f"{assets['tailored_summary']} {assets['tailored_experience']}"
+    final_score = (
+        score_text_against_keywords(keywords, generated_blob)
+        if keywords
+        else {"total": 0, "matched": 0, "missing": []}
+    )
+    update_ats_score(
+        job["id"], final_score["total"], final_score["matched"], final_score["missing"]
+    )
+
+    user_profile = load_user_profile()
     safe_company = "".join(
         c for c in job["company"] if c.isalnum() or c in " -_"
     ).strip()
     output_path = os.path.join(OUTPUT_DIR, f"CV_{safe_company}_{job['id']}.docx")
-    build_docx(persona, assets, output_path)
+    build_docx(persona, assets, output_path, user_profile=user_profile)
 
     save_generated_assets(
         job_id=job["id"],

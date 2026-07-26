@@ -14,7 +14,7 @@ DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jobs.db")
 
 
 def get_connection() -> sqlite3.Connection:
-    return sqlite3.connect(DB_PATH)
+    return sqlite3.connect(DB_PATH, timeout=15.0)
 
 
 def init_db():
@@ -603,3 +603,32 @@ def delete_job(job_id: int):
     conn.commit()
     conn.close()
     log_activity("db_handler", f"Job id={job_id} deleted.")
+
+
+def clear_generated_assets(job_id: int):
+    """Resets a job back to 'ready to generate' — used by the CV library's delete action."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE jobs SET generated_cv = NULL, generated_cover_letter = NULL, docx_path = NULL, cv_approved_at = NULL WHERE id = ?",
+        (job_id,),
+    )
+    conn.commit()
+    conn.close()
+    log_activity("db_handler", f"Cleared generated assets for job id={job_id}.")
+
+
+def get_all_generated_assets() -> list[dict]:
+    """Every job with a generated CV, regardless of status — unlike the Studio's
+    three working sections (which only ever query status='Pending'), this needs
+    to include jobs that have since moved to Applied/Interview/etc., or an
+    applied job's CV becomes invisible the moment it leaves Pending."""
+    conn = get_connection()
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT * FROM jobs WHERE generated_cv IS NOT NULL ORDER BY date_added DESC"
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
