@@ -49,7 +49,11 @@ def _save_state(state: dict):
 def _decode_subject(raw_subject) -> str:
     parts = decode_header(raw_subject or "")
     return "".join(
-        text.decode(encoding or "utf-8", errors="replace") if isinstance(text, bytes) else text
+        (
+            text.decode(encoding or "utf-8", errors="replace")
+            if isinstance(text, bytes)
+            else text
+        )
         for text, encoding in parts
     )
 
@@ -57,19 +61,27 @@ def _decode_subject(raw_subject) -> str:
 def _extract_body(msg) -> str:
     if msg.is_multipart():
         for part in msg.walk():
-            if part.get_content_type() == "text/plain" and not part.get("Content-Disposition"):
+            if part.get_content_type() == "text/plain" and not part.get(
+                "Content-Disposition"
+            ):
                 try:
-                    return part.get_payload(decode=True).decode(part.get_content_charset() or "utf-8", errors="replace")
+                    return part.get_payload(decode=True).decode(
+                        part.get_content_charset() or "utf-8", errors="replace"
+                    )
                 except Exception:
                     continue
         return ""
     try:
-        return msg.get_payload(decode=True).decode(msg.get_content_charset() or "utf-8", errors="replace")
+        return msg.get_payload(decode=True).decode(
+            msg.get_content_charset() or "utf-8", errors="replace"
+        )
     except Exception:
         return ""
 
 
-def _match_job(subject: str, sender: str, applied_jobs: list[dict]) -> dict | None:
+def match_job_for_email(
+    subject: str, sender: str, applied_jobs: list[dict]
+) -> dict | None:
     """Finds the single Applied job this email most plausibly relates to, by
     checking whether the company name appears in the sender or subject.
     Deliberately conservative — returns None rather than guess."""
@@ -89,7 +101,13 @@ def check_inbox() -> dict:
     if not IMAP_EMAIL or not IMAP_PASS:
         raise ValueError("IMAP_EMAIL and IMAP_PASS must be set in .env.")
 
-    counts = {"scanned": 0, "matched": 0, "rejections": 0, "interviews": 0, "flagged": 0}
+    counts = {
+        "scanned": 0,
+        "matched": 0,
+        "rejections": 0,
+        "interviews": 0,
+        "flagged": 0,
+    }
 
     applied_jobs = get_jobs(status="Applied")
     if not applied_jobs:
@@ -107,7 +125,9 @@ def check_inbox() -> dict:
             return counts
 
         # IMAP's UID range search can include the boundary UID itself — filter defensively.
-        uids = sorted(u for u in (int(x) for x in data[0].split()) if u > state["last_uid"])
+        uids = sorted(
+            u for u in (int(x) for x in data[0].split()) if u > state["last_uid"]
+        )
 
         for uid in uids:
             result, msg_data = conn.uid("fetch", str(uid), "(RFC822)")
@@ -120,14 +140,20 @@ def check_inbox() -> dict:
             body = _extract_body(msg)[:2000]
             counts["scanned"] += 1
 
-            job = _match_job(subject, sender, applied_jobs)
+            job = match_job_for_email(subject, sender, applied_jobs)
             if job is None:
                 continue
             counts["matched"] += 1
 
             try:
                 raw_text, _ = generate_json(
-                    "", CLASSIFICATION_PROMPT.format(role=job["role"], company=job["company"], subject=subject, body=body)
+                    "",
+                    CLASSIFICATION_PROMPT.format(
+                        role=job["role"],
+                        company=job["company"],
+                        subject=subject,
+                        body=body,
+                    ),
                 )
                 parsed = json.loads(raw_text)
                 category, reason = parsed.get("category"), parsed.get("reason", "")
@@ -137,15 +163,24 @@ def check_inbox() -> dict:
 
             if category == "REJECTION":
                 update_job_status(job["id"], "Rejected")
-                log_activity("email_monitor", f"Rejection detected: {job['role']} at {job['company']} — {reason}")
+                log_activity(
+                    "email_monitor",
+                    f"Rejection detected: {job['role']} at {job['company']} — {reason}",
+                )
                 counts["rejections"] += 1
             elif category == "INTERVIEW":
                 update_job_status(job["id"], "Interview")
-                log_activity("email_monitor", f"Interview invite detected: {job['role']} at {job['company']} — {reason}")
+                log_activity(
+                    "email_monitor",
+                    f"Interview invite detected: {job['role']} at {job['company']} — {reason}",
+                )
                 counts["interviews"] += 1
             else:
                 update_job_status(job["id"], "Needs Consultation")
-                log_activity("email_monitor", f"Ambiguous email for {job['role']} at {job['company']} — flagged for review.")
+                log_activity(
+                    "email_monitor",
+                    f"Ambiguous email for {job['role']} at {job['company']} — flagged for review.",
+                )
                 counts["flagged"] += 1
 
         if uids:
@@ -163,3 +198,72 @@ def check_inbox() -> dict:
 
 if __name__ == "__main__":
     print(check_inbox())
+
+
+def list_recent_emails(limit: int = 20) -> list[dict]:
+    """Fetches the most recent N messages regardless of processed-state —
+    for browsing/reading, distinct from check_inbox()'s incremental,
+    UID-tracked scan used for automated classification."""
+    if not IMAP_EMAIL or not IMAP_PASS:
+        raise ValueError("IMAP_EMAIL and IMAP_PASS must be set in .env.")
+
+    conn = imaplib.IMAP4_SSL(IMAP_SERVER)
+    emails = []
+    try:
+        conn.login(IMAP_EMAIL, IMAP_PASS)
+        conn.select("INBOX")
+        result, data = conn.uid("search", None, "ALL")
+        if result != "OK" or not data[0]:
+            return []
+
+        uids = sorted((int(u) for u in data[0].split()), reverse=True)[:limit]
+        for uid in uids:
+            result, msg_data = conn.uid("fetch", str(uid), "(RFC822)")
+            if result != "OK" or not msg_data or msg_data[0] is None:
+                continue
+            msg = email.message_from_bytes(msg_data[0][1])
+            emails.append(
+                {
+                    "uid": uid,
+                    "subject": _decode_subject(msg.get("Subject")),
+                    "sender": msg.get("From", ""),
+                    "date": msg.get("Date", ""),
+                    "body": _extract_body(msg),
+                }
+            )
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+    return emails
+
+
+REPLY_DRAFT_PROMPT = """Draft a brief, professional reply to this email as the job \
+candidate. Match tone to context — gracious and concise if it's a rejection, enthusiastic \
+and available if it's an interview invite, neutral and helpful otherwise. Don't invent \
+availability, dates, or facts not given.
+
+From: {sender}
+Subject: {subject}
+Body:
+{body}
+
+{job_context}
+
+Return ONLY valid JSON: {{"reply": "the drafted reply text, ready to copy and send"}}"""
+
+
+def draft_reply(sender: str, subject: str, body: str, job: dict = None) -> str:
+    job_context = (
+        f"Context: relates to the candidate's application for {job['role']} at {job['company']}."
+        if job
+        else ""
+    )
+    raw_text, _ = generate_json(
+        "",
+        REPLY_DRAFT_PROMPT.format(
+            sender=sender, subject=subject, body=body[:2000], job_context=job_context
+        ),
+    )
+    return json.loads(raw_text).get("reply", "")

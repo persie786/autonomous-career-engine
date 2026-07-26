@@ -43,20 +43,16 @@ from modules.persona_builder import (
     polish_career_summary,
 )
 from modules.cv_generator import generate_for_job
-from modules.browser_agent import (
-    prepare_application,
-    close_browser_session,
-    mark_prep_failed,
-    confirm_submitted,
+from database.db_handler import get_job_by_id
+from modules.email_monitor import (
+    check_inbox,
+    list_recent_emails,
+    draft_reply,
+    match_job_for_email,
 )
 from modules.email_monitor import check_inbox
 from modules.report_generator import generate_weekly_report
 from utils.settings import load_settings, save_settings
-from utils.field_memory import (
-    load_field_memory,
-    save_field_memory_answer,
-    delete_field_memory_answer,
-)
 from utils.search_profiles import (
     load_profiles,
     add_profile,
@@ -184,6 +180,7 @@ PAGES = [
     ("settings", "Settings & Guardrails", "⚙️"),
     ("sourcing", "Sourcing Queue", "🔍"),
     ("studio", "Live Asset Studio", "📝"),
+    ("applied_inbox", "Applied & Inbox", "📬"),
     ("action", "Action Required", "⚠️"),
     ("reports", "Reports", "📅"),
 ]
@@ -636,24 +633,12 @@ def render_settings():
         log_activity("settings", f"Confidence threshold changed to {threshold}")
         st.toast(f"Confidence threshold set to {threshold:.0%}")
 
-    st.subheader("Field Memory Cache")
-    st.caption(
-        "Custom application questions and your saved answer — reused automatically when the browser agent finds a matching label."
-    )
-    fm = load_field_memory()
     new_q = st.text_input("Question (match this label text)", key="new_fm_q")
     new_a = st.text_area("Your answer", key="new_fm_a")
     if st.button("Save Answer") and new_q.strip() and new_a.strip():
         save_field_memory_answer(new_q.strip(), new_a.strip())
         st.toast("Saved.")
         st.rerun()
-    for question, answer in fm.items():
-        with st.container(key=f"card_fm_{question}"):
-            st.markdown(f"**{question}**")
-            st.caption(answer[:150] + ("..." if len(answer) > 150 else ""))
-            if st.button("🗑️ Remove", key=f"remove_fm_{question}"):
-                delete_field_memory_answer(question)
-                st.rerun()
 
     st.subheader("Encrypted PII Vault")
     key = os.getenv("ENCRYPTION_KEY")
@@ -736,7 +721,15 @@ def render_sourcing_queue():
                     "✅ Approve", key=f"approve_{job['id']}", use_container_width=True
                 ):
                     update_job_status(job["id"], "Pending")
-                    st.toast(f"Approved: {job['role']}")
+                    with st.spinner("Generating tailored CV..."):
+                        try:
+                            generate_for_job(get_job_by_id(job["id"]))
+                            st.toast(f"Approved and generated CV for: {job['role']}")
+                        except Exception as e:
+                            st.toast(
+                                f"Approved — auto-generation failed ({e}). Generate manually in the Studio.",
+                                icon="⚠️",
+                            )
                     st.rerun()
                 if col2.button(
                     "❌ Reject", key=f"reject_{job['id']}", use_container_width=True
@@ -764,7 +757,7 @@ def render_sourcing_queue():
                     st.warning("This job URL is already in your pipeline.")
                 else:
                     similar = find_similar_jobs(m_company.strip(), m_role.strip())
-                    add_job(
+                    new_job_id = add_job(
                         company=m_company.strip(),
                         role=m_role.strip(),
                         job_url=m_url.strip(),
@@ -775,13 +768,18 @@ def render_sourcing_queue():
                         "manual_entry",
                         f"Manually added: {m_role.strip()} at {m_company.strip()}",
                     )
+                    with st.spinner("Generating tailored CV..."):
+                        try:
+                            generate_for_job(get_job_by_id(new_job_id))
+                        except Exception:
+                            pass  # falls through to 'Ready to Generate' in the Studio
                     if similar:
                         st.toast(
                             f"Added — heads up, similar to '{similar[0]['role']}' already on file ({similar[0]['status']}).",
                             icon="⚠️",
                         )
                     else:
-                        st.toast("Added to pipeline.")
+                        st.toast("Added and CV generated.")
                     st.rerun()
 
 
@@ -977,13 +975,8 @@ def render_asset_studio():
                 render_referral_field(job, "studio_review")
 
     if approved:
-        st.subheader("Approved — Awaiting Submission")
-        st.caption(
-            "The agent fills what it can identify in a real browser window — you review and click Submit yourself."
-        )
-        if "browser_sessions" not in st.session_state:
-            st.session_state.browser_sessions = {}
-
+        st.subheader("Approved — Ready to Apply")
+        st.caption("Open the posting yourself and apply — confirm here once you have.")
         for job in approved:
             with st.container(key=f"card_{job['id']}"):
                 st.html(
@@ -996,41 +989,24 @@ def render_asset_studio():
                     )
                 )
                 st.caption(f"Approved {format_relative_time(job['cv_approved_at'])}")
+                st.markdown(f"[🔗 Open Job Posting]({job['job_url']})")
 
-                session = st.session_state.browser_sessions.get(job["id"])
-                if session is None:
-                    if st.button(
-                        "🌐 Open & Autofill Application", key=f"prep_{job['id']}"
-                    ):
-                        with st.spinner(
-                            "Opening browser and filling what it can find..."
-                        ):
-                            try:
-                                result = prepare_application(job)
-                                st.session_state.browser_sessions[job["id"]] = result
-                                st.toast(
-                                    f"Filled: {', '.join(result['filled']) or 'nothing recognized'}"
-                                )
-                            except Exception as e:
-                                mark_prep_failed(job["id"], job.get("retry_count", 0))
-                                st.error(f"Prep failed: {e}")
-                        st.rerun()
-                else:
-                    st.info(
-                        f"Browser window open. Filled: {', '.join(session['filled']) or 'nothing'}. "
-                        f"Needs your attention: {', '.join(session['skipped']) or 'nothing'}. "
-                        "Review everything in the window, then click Submit there yourself."
-                    )
-                    if st.button(
-                        "✅ I Submitted This — Close Browser",
-                        key=f"confirm_{job['id']}",
-                        type="primary",
-                    ):
-                        close_browser_session(session)
-                        confirm_submitted(job["id"])
-                        del st.session_state.browser_sessions[job["id"]]
-                        st.toast(f"Marked as Applied: {job['role']}")
-                        st.rerun()
+                docx_path = job.get("docx_path")
+                if docx_path and os.path.exists(docx_path):
+                    with open(docx_path, "rb") as f:
+                        st.download_button(
+                            "⬇️ Download tailored CV",
+                            data=f.read(),
+                            file_name=os.path.basename(docx_path),
+                            key=f"finaldl_{job['id']}",
+                        )
+
+                if st.button(
+                    "✅ Mark as Applied", key=f"markapplied_{job['id']}", type="primary"
+                ):
+                    update_job_status(job["id"], "Applied")
+                    st.toast(f"Marked as Applied: {job['role']}")
+                    st.rerun()
                 render_notes_field(job, "studio_approved")
                 render_referral_field(job, "studio_approved")
 
@@ -1368,6 +1344,118 @@ def render_overview():
         )
 
 
+def render_applied_and_inbox():
+    st.title("Applied Jobs & Inbox")
+
+    st.subheader("Applied Jobs")
+    jobs = get_jobs()
+    applied_jobs = [j for j in jobs if j.get("date_applied")]
+
+    if not applied_jobs:
+        st.info("Nothing applied to yet.")
+    else:
+        adf = pd.DataFrame(applied_jobs)
+        display_cols = [
+            c
+            for c in [
+                "role",
+                "company",
+                "status",
+                "persona_used",
+                "job_url",
+                "referral_contact",
+                "search_profile",
+                "date_applied",
+            ]
+            if c in adf.columns
+        ]
+        st.dataframe(
+            adf[display_cols],
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "role": "Role",
+                "company": "Company",
+                "status": "Status",
+                "persona_used": "Persona Used",
+                "job_url": st.column_config.LinkColumn("Posting"),
+                "referral_contact": "Referral",
+                "search_profile": "Profile",
+                "date_applied": "Applied On",
+            },
+        )
+        st.caption(
+            "Need to change a status, add a note, or delete one? That's in Overview & Data — this view is for a clean at-a-glance list."
+        )
+
+        with st.expander("Download CVs for applied jobs"):
+            for job in applied_jobs:
+                if job.get("docx_path") and os.path.exists(job["docx_path"]):
+                    with open(job["docx_path"], "rb") as f:
+                        st.download_button(
+                            f"⬇️ {job['role']} @ {job['company']}",
+                            data=f.read(),
+                            file_name=os.path.basename(job["docx_path"]),
+                            key=f"appdl_{job['id']}",
+                        )
+
+    st.divider()
+    st.subheader("📧 Inbox")
+
+    col1, col2 = st.columns([1, 5])
+    if col1.button("🔄 Refresh"):
+        try:
+            st.session_state.recent_emails = list_recent_emails(limit=20)
+            st.toast("Inbox refreshed.")
+        except Exception as e:
+            st.error(f"Couldn't fetch inbox: {e}")
+        st.rerun()
+
+    if "recent_emails" not in st.session_state:
+        try:
+            st.session_state.recent_emails = list_recent_emails(limit=20)
+        except Exception as e:
+            st.session_state.recent_emails = []
+            st.warning(f"Couldn't load inbox: {e}")
+
+    if not st.session_state.recent_emails:
+        st.info("No messages loaded — hit Refresh.")
+    else:
+        for mail in st.session_state.recent_emails:
+            with st.container(key=f"card_mail_{mail['uid']}"):
+                st.markdown(f"**{mail['subject']}**")
+                st.caption(f"From: {mail['sender']} — {mail['date']}")
+                with st.expander("View message"):
+                    st.write(mail["body"][:2000])
+
+                matched_job = match_job_for_email(mail["subject"], mail["sender"], jobs)
+                if matched_job:
+                    st.caption(
+                        f"🔗 Looks related to: **{matched_job['role']}** at **{matched_job['company']}**"
+                    )
+
+                draft_key = f"draft_{mail['uid']}"
+                if st.button("✨ Draft AI Reply", key=f"draftbtn_{mail['uid']}"):
+                    with st.spinner("Drafting..."):
+                        try:
+                            st.session_state[draft_key] = draft_reply(
+                                mail["sender"],
+                                mail["subject"],
+                                mail["body"],
+                                job=matched_job,
+                            )
+                        except Exception as e:
+                            st.error(f"Draft failed: {e}")
+
+                if draft_key in st.session_state:
+                    st.text_area(
+                        "Drafted reply — copy and send from your own email client",
+                        value=st.session_state[draft_key],
+                        key=f"draftarea_{mail['uid']}",
+                        height=150,
+                    )
+
+
 def render_profile():
     st.title("Profile")
     st.caption(
@@ -1450,6 +1538,7 @@ PAGE_RENDERERS = {
     "settings": render_settings,
     "sourcing": render_sourcing_queue,
     "studio": render_asset_studio,
+    "applied_inbox": render_applied_and_inbox,
     "action": render_action_required,
     "reports": render_reports,
 }

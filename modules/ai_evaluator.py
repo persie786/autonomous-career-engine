@@ -2,6 +2,8 @@ import json
 import os
 import time
 from openai import OpenAI
+from modules.cv_generator import generate_for_job
+from database.db_handler import get_job_by_id
 
 from database.db_handler import add_job, update_job_status, log_activity
 from utils.settings import load_settings
@@ -113,6 +115,12 @@ def run_sourcing_pipeline(candidates: list[dict]) -> dict:
 
             if result["match_score"] >= threshold:
                 counts["auto_approved"] += 1  # stays 'Pending', the schema default
+                try:
+                    generate_for_job(get_job_by_id(job_id))
+                except Exception:
+                    logger.exception(
+                        f"Auto-generation failed for job id={job_id} — left for manual generation in the Studio."
+                    )
             else:
                 update_job_status(job_id, "Manual Review")
                 counts["manual_review"] += 1
