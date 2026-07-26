@@ -633,13 +633,6 @@ def render_settings():
         log_activity("settings", f"Confidence threshold changed to {threshold}")
         st.toast(f"Confidence threshold set to {threshold:.0%}")
 
-    new_q = st.text_input("Question (match this label text)", key="new_fm_q")
-    new_a = st.text_area("Your answer", key="new_fm_a")
-    if st.button("Save Answer") and new_q.strip() and new_a.strip():
-        save_field_memory_answer(new_q.strip(), new_a.strip())
-        st.toast("Saved.")
-        st.rerun()
-
     st.subheader("Encrypted PII Vault")
     key = os.getenv("ENCRYPTION_KEY")
     if not key:
