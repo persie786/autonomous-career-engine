@@ -4,7 +4,8 @@ import imaplib
 import email
 from email.header import decode_header
 from dotenv import load_dotenv
-
+from utils.user_context import get_current_user
+from database.db_handler import get_user_email_credentials
 from database.db_handler import get_jobs, update_job_status, log_activity
 from utils.ai_router import generate_json
 from utils.logger import setup_logger
@@ -16,8 +17,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATE_PATH = os.path.join(PROJECT_ROOT, "data", "email_state.json")
 
 IMAP_SERVER = os.getenv("IMAP_SERVER", "imap.gmail.com")
-IMAP_EMAIL = os.getenv("IMAP_EMAIL")
-IMAP_PASS = os.getenv("IMAP_PASS")
+
 
 CLASSIFICATION_PROMPT = """You are classifying one email that may relate to a job application \
 for the role of "{role}" at "{company}". Decide which category applies:
@@ -98,8 +98,9 @@ def check_inbox() -> dict:
     by company name, classifies matched ones, and updates job status. This
     is what the Dashboard's 'Check Inbox' button calls.
     """
-    if not IMAP_EMAIL or not IMAP_PASS:
-        raise ValueError("IMAP_EMAIL and IMAP_PASS must be set in .env.")
+    imap_email, imap_server, imap_pass = get_user_email_credentials(get_current_user())
+    if not imap_email or not imap_pass:
+        raise ValueError("No email credentials saved yet — add them in Settings first.")
 
     counts = {
         "scanned": 0,
@@ -114,10 +115,10 @@ def check_inbox() -> dict:
         return counts
 
     state = _load_state()
-    conn = imaplib.IMAP4_SSL(IMAP_SERVER)
+    conn = imaplib.IMAP4_SSL(imap_server)
 
     try:
-        conn.login(IMAP_EMAIL, IMAP_PASS)
+        conn.login(imap_email, imap_pass)
         conn.select("INBOX")
 
         result, data = conn.uid("search", None, f'UID {state["last_uid"] + 1}:*')
@@ -204,13 +205,14 @@ def list_recent_emails(limit: int = 20) -> list[dict]:
     """Fetches the most recent N messages regardless of processed-state —
     for browsing/reading, distinct from check_inbox()'s incremental,
     UID-tracked scan used for automated classification."""
-    if not IMAP_EMAIL or not IMAP_PASS:
-        raise ValueError("IMAP_EMAIL and IMAP_PASS must be set in .env.")
+    imap_email, imap_server, imap_pass = get_user_email_credentials(get_current_user())
+    if not imap_email or not imap_pass:
+        raise ValueError("No email credentials saved yet — add them in Settings first.")
 
-    conn = imaplib.IMAP4_SSL(IMAP_SERVER)
+    conn = imaplib.IMAP4_SSL(imap_server)
     emails = []
     try:
-        conn.login(IMAP_EMAIL, IMAP_PASS)
+        conn.login(imap_email, imap_pass)
         conn.select("INBOX")
         result, data = conn.uid("search", None, "ALL")
         if result != "OK" or not data[0]:

@@ -7,6 +7,13 @@ from datetime import datetime
 from dotenv import load_dotenv
 from cryptography.fernet import Fernet
 from utils.storage import read_binary, write_binary, binary_exists
+from utils.auth import create_user, verify_login
+from utils.user_context import set_current_user, clear_current_user
+from utils.blob_store import init_blob_store
+from database.db_handler import (
+    update_user_email_credentials,
+    get_user_email_credentials,
+)
 from database.db_handler import (
     init_db,
     get_jobs,
@@ -80,6 +87,64 @@ st.set_page_config(
 )
 st.html(CUSTOM_CSS)
 
+
+def render_auth_page():
+    st.title("⚙️ Career Engine")
+    tab_login, tab_signup = st.tabs(["Log In", "Sign Up"])
+
+    with tab_login:
+        with st.form("login_form"):
+            email = st.text_input("Email")
+            password = st.text_input("Password", type="password")
+            if st.form_submit_button("Log In", type="primary"):
+                user = verify_login(email.strip().lower(), password)
+                if user:
+                    st.session_state.logged_in_user_id = user["id"]
+                    st.session_state.logged_in_email = user["email"]
+                    st.rerun()
+                else:
+                    st.error("Invalid email or password.")
+
+    with tab_signup:
+        with st.form("signup_form"):
+            new_email = st.text_input("Email", key="signup_email")
+            new_password = st.text_input("Password", type="password", key="signup_pw")
+            confirm_password = st.text_input(
+                "Confirm Password", type="password", key="signup_pw2"
+            )
+            if st.form_submit_button("Create Account", type="primary"):
+                if not new_email.strip() or "@" not in new_email:
+                    st.error("Enter a valid email.")
+                elif len(new_password) < 8:
+                    st.error("Password must be at least 8 characters.")
+                elif new_password != confirm_password:
+                    st.error("Passwords don't match.")
+                else:
+                    try:
+                        set_current_user(
+                            0
+                        )  # temporary, only to satisfy log_activity() during account creation
+                        user_id = create_user(new_email.strip().lower(), new_password)
+                        st.session_state.logged_in_user_id = user_id
+                        st.session_state.logged_in_email = new_email.strip().lower()
+                        st.rerun()
+                    except ValueError as e:
+                        st.error(str(e))
+
+
+init_db()
+init_blob_store()
+
+if "logged_in_user_id" not in st.session_state:
+    render_auth_page()
+    st.stop()
+
+set_current_user(st.session_state.logged_in_user_id)
+
+if "app_initialized" not in st.session_state:
+    apply_ghosting_webhook()
+    st.session_state.app_initialized = True
+
 MODULE_ICONS = {
     "db_handler": "🗄️",
     "settings": "⚙️",
@@ -92,10 +157,17 @@ MODULE_ICONS = {
 }
 
 # ---------- Startup tasks — unchanged logic, still runs exactly once per session ----------
+init_db()
+init_blob_store()
+
+if "logged_in_user_id" not in st.session_state:
+    render_auth_page()
+    st.stop()
+
+set_current_user(st.session_state.logged_in_user_id)
+
 if "app_initialized" not in st.session_state:
-    init_db()
     apply_ghosting_webhook()
-    init_blob_store()
     st.session_state.app_initialized = True
 
 if "inbox_checked_this_session" not in st.session_state:
@@ -195,6 +267,11 @@ with st.sidebar:
         '<div class="sidebar-wordmark">CAREER<span>.ENGINE</span></div>'
         '<div class="sidebar-subtitle">Autonomous Pipeline</div>'
     )
+    if st.button("🚪 Log Out", key="logout_btn"):
+        clear_current_user()
+        for k in ("logged_in_user_id", "logged_in_email", "app_initialized"):
+            st.session_state.pop(k, None)
+        st.rerun()
 
     for page_id, label, icon in PAGES:
         with st.container(key=f"nav_{page_id}"):
@@ -632,6 +709,35 @@ def render_settings():
         save_settings(settings)
         log_activity("settings", f"Confidence threshold changed to {threshold}")
         st.toast(f"Confidence threshold set to {threshold:.0%}")
+    st.subheader("Email Connection")
+    st.caption(
+        "Your own email, used only to scan for replies about your own applications. Stored encrypted — no one else can read it."
+    )
+    current_email, current_server, _ = get_user_email_credentials(
+        st.session_state.logged_in_user_id
+    )
+    with st.form("email_creds_form"):
+        e_email = st.text_input("Email address", value=current_email or "")
+        e_server = st.text_input(
+            "IMAP Server", value=current_server or "imap.gmail.com"
+        )
+        e_password = st.text_input(
+            "App Password",
+            type="password",
+            placeholder="Leave blank to keep your current saved password",
+        )
+        if st.form_submit_button("💾 Save Email Credentials"):
+            if not e_email.strip():
+                st.warning("Enter an email address.")
+            else:
+                update_user_email_credentials(
+                    st.session_state.logged_in_user_id,
+                    e_email.strip(),
+                    e_server.strip(),
+                    e_password or None,
+                )
+                st.toast("Email credentials saved.")
+                st.rerun()
 
     st.subheader("Encrypted PII Vault")
     key = os.getenv("ENCRYPTION_KEY")
