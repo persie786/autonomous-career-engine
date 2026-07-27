@@ -2,12 +2,19 @@ from database.db_handler import get_connection
 from utils.user_context import get_current_user
 
 
+_blob_store_initialized = False
+
+
 def init_blob_store():
+    global _blob_store_initialized
+    if _blob_store_initialized:
+        return
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("CREATE TABLE IF NOT EXISTS blobs (key TEXT PRIMARY KEY, content BLOB, updated_at TEXT DEFAULT (datetime('now')))")
     conn.commit()
     conn.close()
+    _blob_store_initialized = True
 
 
 def _scoped(key: str) -> str:

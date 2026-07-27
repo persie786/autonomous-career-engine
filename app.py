@@ -265,15 +265,19 @@ if "personas_ensured_this_session" not in st.session_state:
 # SIDEBAR — wordmark, custom nav (session_state router), live status footer
 # =========================================================================
 PAGES = [
+    # 1. Visibility & Urgency (What do I need to know right now?)
     ("dashboard", "Dashboard", "📊"),
-    ("overview", "Overview & Data", "🗂️"),
-    ("profile", "Profile", "👤"),
-    ("settings", "Settings & Guardrails", "⚙️"),
+    ("action", "Action Required", "⚠️"),
+    # 2. The Core Workflow Funnel (The actual engine pipeline)
     ("sourcing", "Sourcing Queue", "🔍"),
     ("studio", "Live Asset Studio", "📝"),
     ("applied_inbox", "Applied & Inbox", "📬"),
-    ("action", "Action Required", "⚠️"),
+    # 3. Analytics & Tracking (How is the system performing?)
+    ("overview", "Overview & Data", "🗂️"),
     ("reports", "Reports", "📅"),
+    # 4. Configuration & Admin (Set it and forget it)
+    ("profile", "Profile", "👤"),
+    ("settings", "Settings & Guardrails", "⚙️"),
 ]
 
 if "active_page" not in st.session_state:

@@ -85,11 +85,19 @@ def get_connection():
     return sqlite3.connect(DB_PATH)
 
 
+_db_initialized = False
+
+
 def init_db():
+    global _db_initialized
+    if _db_initialized:
+        return
     conn = get_connection()
     cursor = conn.cursor()
     if not TURSO_URL:
-        cursor.execute("PRAGMA journal_mode=WAL")  # local-file concept only — Turso's Hrana protocol rejects this
+        cursor.execute(
+            "PRAGMA journal_mode=WAL"
+        )  # local-file concept only — Turso's Hrana protocol rejects this
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
@@ -183,6 +191,7 @@ def init_db():
 
     conn.commit()
     conn.close()
+    _db_initialized = True
     logger.info("Database initialized.")
 
 
