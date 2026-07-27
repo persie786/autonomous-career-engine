@@ -88,6 +88,23 @@ st.set_page_config(
 st.html(CUSTOM_CSS)
 
 
+@st.cache_data(ttl=8, show_spinner=False)
+def _cached_get_jobs(user_id: int, status: str = None) -> list:
+    return get_jobs(status=status)
+
+
+@st.cache_data(ttl=8, show_spinner=False)
+def _cached_get_recent_activity(
+    user_id: int, limit: int = 30, module: str = None
+) -> list:
+    return get_recent_activity(limit=limit, module=module)
+
+
+@st.cache_data(ttl=20, show_spinner=False)
+def _cached_get_activity_modules(user_id: int) -> list:
+    return get_activity_modules()
+
+
 def render_auth_page():
     st.title("⚙️ Career Engine")
     tab_login, tab_signup = st.tabs(["Log In", "Sign Up"])
@@ -286,7 +303,7 @@ with st.sidebar:
                 st.rerun()
 
     st.divider()
-    _all_jobs_sidebar = get_jobs()
+    _all_jobs_sidebar = _cached_get_jobs(st.session_state.logged_in_user_id)
     _needs_you = len(
         [
             j
@@ -327,7 +344,7 @@ def render_dashboard():
                 st.error(f"Inbox check failed: {e}")
         st.rerun()
 
-    jobs = get_jobs()
+    jobs = _cached_get_jobs(st.session_state.logged_in_user_id)
     df = pd.DataFrame(jobs)
 
     if df.empty:
@@ -406,7 +423,7 @@ def render_dashboard():
     st.subheader("Execution Audit Trail")
     col1, col2, col3 = st.columns([3, 2, 1])
     col1.caption(f"Last updated: {datetime.now().strftime('%H:%M:%S')}")
-    modules = get_activity_modules()
+    modules = _cached_get_activity_modules(st.session_state.logged_in_user_id)
     selected_module = col2.selectbox(
         "Filter by module", ["All"] + modules, label_visibility="collapsed"
     )
@@ -418,8 +435,10 @@ def render_dashboard():
         placeholder="🔍 Search descriptions...",
         label_visibility="collapsed",
     )
-    activity = get_recent_activity(
-        limit=50, module=None if selected_module == "All" else selected_module
+    activity = _cached_get_recent_activity(
+        st.session_state.logged_in_user_id,
+        limit=50,
+        module=None if selected_module == "All" else selected_module,
     )
     if search_term:
         activity = [
@@ -798,7 +817,9 @@ def render_sourcing_queue():
     st.caption(
         "Passed red-flag filtering and got a GO from the evaluator, but scored below your confidence threshold."
     )
-    pending = get_jobs(status="Manual Review")
+    pending = _cached_get_jobs(
+        st.session_state.logged_in_user_id, status="Manual Review"
+    )
     if not pending:
         st.info("Nothing waiting on you right now.")
     else:
@@ -904,7 +925,7 @@ def render_asset_studio():
             j["ats_keywords_matched"] / j["ats_keywords_total"] for j in ats_scored
         ) / len(ats_scored)
 
-    jobs = get_jobs(status="Pending")
+    jobs = _cached_get_jobs(st.session_state.logged_in_user_id, status="Pending")
     needs_generation = [j for j in jobs if not j.get("generated_cv")]
     needs_review = [
         j for j in jobs if j.get("generated_cv") and not j.get("cv_approved_at")
@@ -1168,7 +1189,9 @@ def render_action_required():
         "Jobs the pipeline couldn't handle automatically — an evaluator hiccup, or a form the browser agent couldn't confidently fill after repeated tries."
     )
 
-    flagged = get_jobs(status="Needs Consultation")
+    flagged = _cached_get_jobs(
+        st.session_state.logged_in_user_id, status="Needs Consultation"
+    )
     if not flagged:
         st.info("Nothing needs your attention right now.")
         return
@@ -1262,7 +1285,7 @@ def render_overview():
         "Every job in one place — search, sort, and act directly from the table."
     )
 
-    jobs = get_jobs()
+    jobs = _cached_get_jobs(st.session_state.logged_in_user_id)
     if not jobs:
         st.info("No jobs yet.")
         return
@@ -1458,7 +1481,7 @@ def render_applied_and_inbox():
     st.title("Applied Jobs & Inbox")
 
     st.subheader("Applied Jobs")
-    jobs = get_jobs()
+    jobs = _cached_get_jobs(st.session_state.logged_in_user_id)
     applied_jobs = [j for j in jobs if j.get("date_applied")]
 
     if not applied_jobs:
