@@ -6,6 +6,76 @@ from cryptography.fernet import Fernet
 from utils.logger import setup_logger
 import json
 import re
+import libsql
+
+TURSO_URL = os.getenv("libsql://career-engine-persie786.aws-ap-northeast-1.turso.io")
+TURSO_TOKEN = os.getenv(
+    "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJpYXQiOjE3ODUxMjg5MzYsImlkIjoiMDE5ZmExZjktMWYwMS03ZmIxLTg3OGYtMzc0ODIwN2I0ODdjIiwia2lkIjoiTGhZdzFSMlpRU0ZQaC1xS0pBT0ozbmFzZzZ4MGVsTTg1Uk1FUGtxRUVUZyIsInJpZCI6IjZmY2Q4MTM1LTRmYWUtNDMyMy05NTdhLTA5ZDAxMTZiYTNiOCJ9.oZ5OyUkEf12t_Uj8lxKzNzG--igMF4D36FiuoC1O8sfgKD5RGN3S0np1jcnFH_luFFRAzoFZB3vIIHtTipXwDA"
+)
+
+_turso_connection_cache = None
+
+
+class _CompatRow(tuple):
+    """Makes a plain libsql row behave exactly like sqlite3.Row — every
+    existing function in this file does row['status'], dict(row), or
+    row[0] somewhere, and libsql only gives you the last one natively."""
+
+    def __new__(cls, columns, values):
+        obj = super().__new__(cls, values)
+        obj._columns = columns
+        return obj
+
+    def __getitem__(self, key):
+        if isinstance(key, str):
+            return tuple.__getitem__(self, self._columns.index(key))
+        return tuple.__getitem__(self, key)
+
+    def keys(self):
+        return self._columns
+
+
+class _CompatCursor:
+    def __init__(self, raw_cursor):
+        self._cursor = raw_cursor
+
+    def execute(self, *args, **kwargs):
+        self._cursor.execute(*args, **kwargs)
+        return self
+
+    def fetchone(self):
+        row = self._cursor.fetchone()
+        return self._wrap(row) if row is not None else None
+
+    def fetchall(self):
+        return [self._wrap(row) for row in self._cursor.fetchall()]
+
+    def _wrap(self, row):
+        columns = [d[0] for d in self._cursor.description]
+        return _CompatRow(columns, row)
+
+    @property
+    def lastrowid(self):
+        return self._cursor.lastrowid
+
+    @property
+    def rowcount(self):
+        return self._cursor.rowcount
+
+
+class _CompatConnection:
+    def __init__(self, raw_conn):
+        self._conn = raw_conn
+
+    def cursor(self):
+        return _CompatCursor(self._conn.cursor())
+
+    def commit(self):
+        self._conn.commit()
+
+    def close(self):
+        pass  # a cached Turso connection stays open for the app's life — see get_connection()
+
 
 load_dotenv()
 logger = setup_logger("db_handler")
@@ -13,8 +83,22 @@ logger = setup_logger("db_handler")
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jobs.db")
 
 
-def get_connection() -> sqlite3.Connection:
-    return sqlite3.connect(DB_PATH, timeout=15.0)
+def get_connection():
+    """
+    Local dev (no TURSO_DATABASE_URL set): identical to before — a fresh
+    sqlite3 connection to the local jobs.db file, no Turso account needed.
+    Deployed (TURSO_DATABASE_URL set): a single cached connection to your
+    persistent Turso database, reused across calls rather than reconnecting
+    every time — each "connection" is now a real network round-trip, so
+    treating it like a free local file handle would be needlessly slow.
+    """
+    global _turso_connection_cache
+    if TURSO_URL:
+        if _turso_connection_cache is None:
+            raw = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+            _turso_connection_cache = _CompatConnection(raw)
+        return _turso_connection_cache
+    return sqlite3.connect(DB_PATH)
 
 
 def init_db():

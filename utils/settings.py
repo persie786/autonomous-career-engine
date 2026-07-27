@@ -1,6 +1,8 @@
 import json
 import os
 
+from utils.storage import write_json, read_json
+
 SETTINGS_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "settings.json"
 )
@@ -12,20 +14,8 @@ DEFAULT_SETTINGS = {
 
 
 def load_settings() -> dict:
-    if not os.path.exists(SETTINGS_PATH):
-        save_settings(DEFAULT_SETTINGS)
-        return DEFAULT_SETTINGS.copy()
-
-    try:
-        with open(SETTINGS_PATH, "r") as f:
-            saved = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return DEFAULT_SETTINGS.copy()
-
-    return {**DEFAULT_SETTINGS, **saved}
+    return read_json(SETTINGS_PATH, "settings", DEFAULT_SETTINGS)
 
 
 def save_settings(settings: dict):
-    os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)
-    with open(SETTINGS_PATH, "w") as f:
-        json.dump(settings, f, indent=2)
+    write_json(SETTINGS_PATH, "settings", settings)

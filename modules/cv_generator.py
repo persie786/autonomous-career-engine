@@ -3,6 +3,8 @@ import os
 from google import genai
 from google.genai import types
 from docx import Document
+from io import BytesIO
+from utils.storage import write_binary
 from modules.ats_scorer import (
     extract_keywords,
     score_persona_against_keywords,
@@ -185,8 +187,11 @@ def build_docx(
     for tag, value in tags.items():
         if not _replace_tag(doc, tag, value):
             logger.warning(f"Tag {tag} not found in template — check master_cv.docx.")
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    doc.save(output_path)
+    buffer = BytesIO()
+    doc.save(buffer)
+    write_binary(
+        output_path, f"cv_docx::{os.path.basename(output_path)}", buffer.getvalue()
+    )
 
 
 def generate_for_job(job: dict) -> dict:

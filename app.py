@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 from datetime import datetime
 from dotenv import load_dotenv
 from cryptography.fernet import Fernet
-
+from utils.storage import read_binary, write_binary, binary_exists
 from database.db_handler import (
     init_db,
     get_jobs,
@@ -67,6 +67,7 @@ from utils.user_profile import (
     load_user_profile,
 )
 from modules.persona_builder import create_persona_variant
+from utils.blob_store import init_blob_store
 
 load_dotenv()
 logger = setup_logger("app")
@@ -94,6 +95,7 @@ MODULE_ICONS = {
 if "app_initialized" not in st.session_state:
     init_db()
     apply_ghosting_webhook()
+    init_blob_store()
     st.session_state.app_initialized = True
 
 if "inbox_checked_this_session" not in st.session_state:
@@ -374,13 +376,11 @@ def render_settings():
         st.subheader("Base Resume")
         uploaded_pdf = st.file_uploader("Upload your base resume (PDF)", type=["pdf"])
         if uploaded_pdf is not None:
-            os.makedirs("data", exist_ok=True)
-            with open(resume_path, "wb") as f:
-                f.write(uploaded_pdf.getbuffer())
+            write_binary(resume_path, "base_resume", uploaded_pdf.getbuffer().tobytes())
             log_activity("settings", "Base resume uploaded/replaced.")
             st.toast("Resume saved.")
 
-        if os.path.exists(resume_path):
+        if binary_exists(resume_path, "base_resume"):
             uploaded_at = format_relative_time(
                 datetime.fromtimestamp(os.path.getmtime(resume_path)).strftime(
                     "%Y-%m-%d %H:%M:%S"
@@ -933,12 +933,15 @@ def render_asset_studio():
                     "Editing here updates the saved text for your records — the downloadable .docx is Gemini's original generation. Polish the actual file in Word before it goes anywhere."
                 )
 
-                docx_path = job.get("docx_path")
-                if docx_path and os.path.exists(docx_path):
-                    with open(docx_path, "rb") as f:
+                cv_key = (
+                    f"cv_docx::{os.path.basename(docx_path)}" if docx_path else None
+                )
+                if docx_path and (os.path.exists(docx_path) or True):
+                    cv_bytes = read_binary(docx_path, cv_key)
+                    if cv_bytes:
                         st.download_button(
                             "⬇️ Download tailored CV (.docx)",
-                            data=f.read(),
+                            data=cv_bytes,
                             file_name=os.path.basename(docx_path),
                             key=f"dl_{job['id']}",
                         )
@@ -985,11 +988,15 @@ def render_asset_studio():
                 st.markdown(f"[🔗 Open Job Posting]({job['job_url']})")
 
                 docx_path = job.get("docx_path")
-                if docx_path and os.path.exists(docx_path):
-                    with open(docx_path, "rb") as f:
+                cv_key = (
+                    f"cv_docx::{os.path.basename(docx_path)}" if docx_path else None
+                )
+                if docx_path and (os.path.exists(docx_path) or True):
+                    cv_bytes = read_binary(docx_path, cv_key)
+                    if cv_bytes:
                         st.download_button(
                             "⬇️ Download tailored CV",
-                            data=f.read(),
+                            data=cv_bytes,
                             file_name=os.path.basename(docx_path),
                             key=f"finaldl_{job['id']}",
                         )
@@ -1023,11 +1030,15 @@ def render_asset_studio():
                 )
                 col1, col2 = st.columns(2)
                 docx_path = job.get("docx_path")
-                if docx_path and os.path.exists(docx_path):
-                    with open(docx_path, "rb") as f:
+                cv_key = (
+                    f"cv_docx::{os.path.basename(docx_path)}" if docx_path else None
+                )
+                if docx_path and (os.path.exists(docx_path) or True):
+                    cv_bytes = read_binary(docx_path, cv_key)
+                    if cv_bytes:
                         col1.download_button(
                             "⬇️ Download",
-                            data=f.read(),
+                            data=cv_bytes,
                             file_name=os.path.basename(docx_path),
                             key=f"dl_lib_{job['id']}",
                             use_container_width=True,

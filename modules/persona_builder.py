@@ -6,6 +6,8 @@ from google.genai import types
 from utils.ai_router import generate_json
 from utils.logger import setup_logger
 from dotenv import load_dotenv
+from io import BytesIO
+from utils.storage import read_binary, binary_exists
 
 load_dotenv()
 
@@ -35,8 +37,10 @@ Resume text:
 
 
 def extract_resume_text(pdf_path: str = RESUME_PATH) -> str:
-    """Pulls all embedded text out of the base resume PDF."""
-    reader = PdfReader(pdf_path)
+    content = read_binary(pdf_path, "base_resume")
+    if content is None:
+        raise FileNotFoundError("No base resume found.")
+    reader = PdfReader(BytesIO(content))
     return "\n".join(page.extract_text() or "" for page in reader.pages).strip()
 
 
@@ -45,7 +49,7 @@ def build_persona(name: str = "default") -> dict:
     Extracts structured resume data via Gemini and saves it into personas.json
     under the given name, overwriting any existing persona with that name.
     """
-    if not os.path.exists(RESUME_PATH):
+    if not binary_exists(RESUME_PATH, "base_resume"):
         raise FileNotFoundError(
             "No base resume found — upload one in the Settings tab first."
         )

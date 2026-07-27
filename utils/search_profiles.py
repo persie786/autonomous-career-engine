@@ -1,5 +1,6 @@
 import json
 import os
+from utils.storage import read_json, write_json
 
 PROFILES_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -20,17 +21,14 @@ DEFAULT_PROFILE = {
 
 
 def load_profiles() -> list[dict]:
-    if not os.path.exists(PROFILES_PATH):
-        save_profiles([DEFAULT_PROFILE])
-        return [DEFAULT_PROFILE.copy()]
-    with open(PROFILES_PATH, "r") as f:
-        return json.load(f)
+    result = read_json(
+        PROFILES_PATH, "search_profiles", {"profiles": [DEFAULT_PROFILE]}
+    )
+    return result["profiles"] if isinstance(result, dict) else result
 
 
 def save_profiles(profiles: list[dict]):
-    os.makedirs(os.path.dirname(PROFILES_PATH), exist_ok=True)
-    with open(PROFILES_PATH, "w") as f:
-        json.dump(profiles, f, indent=2)
+    write_json(PROFILES_PATH, "search_profiles", {"profiles": profiles})
 
 
 def get_active_profiles() -> list[dict]:
@@ -58,4 +56,3 @@ def update_profile(name: str, updated: dict):
 def delete_profile(name: str):
     profiles = [p for p in load_profiles() if p["name"].lower() != name.lower()]
     save_profiles(profiles)
-

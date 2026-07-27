@@ -1,5 +1,6 @@
 import json
 import os
+from utils.storage import read_json, write_json
 
 PROFILE_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -23,15 +24,8 @@ DEFAULT_PROFILE = {
 
 
 def load_user_profile() -> dict:
-    if not os.path.exists(PROFILE_PATH):
-        save_user_profile(DEFAULT_PROFILE)
-        return DEFAULT_PROFILE.copy()
-    with open(PROFILE_PATH, "r") as f:
-        saved = json.load(f)
-    return {**DEFAULT_PROFILE, **saved}
+    return read_json(PROFILE_PATH, "user_profile", DEFAULT_PROFILE)
 
 
 def save_user_profile(profile: dict):
-    os.makedirs(os.path.dirname(PROFILE_PATH), exist_ok=True)
-    with open(PROFILE_PATH, "w") as f:
-        json.dump(profile, f, indent=2)
+    write_json(PROFILE_PATH, "user_profile", profile)
