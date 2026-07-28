@@ -75,6 +75,13 @@ from utils.user_profile import (
 )
 from modules.persona_builder import create_persona_variant
 from utils.blob_store import init_blob_store
+from modules.email_monitor import (
+    check_inbox,
+    list_recent_emails,
+    draft_reply,
+    match_job_for_email,
+    test_connection,
+)
 
 load_dotenv()
 logger = setup_logger("app")
@@ -736,9 +743,19 @@ def render_settings():
     st.caption(
         "Your own email, used only to scan for replies about your own applications. Stored encrypted — no one else can read it."
     )
-    current_email, current_server, _ = get_user_email_credentials(
+
+    current_email, current_server, current_password = get_user_email_credentials(
         st.session_state.logged_in_user_id
     )
+
+    with st.expander("❓ Where do I get an App Password? (takes ~2 minutes)"):
+        st.markdown("""
+1. Turn on **2-Step Verification** at [myaccount.google.com/security](https://myaccount.google.com/security), if it isn't on already.
+2. Go to [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords).
+3. Create one — name it anything, e.g. "career-engine" — and copy the 16-character code shown.
+4. Paste that code below. **Not your regular Google password** — Google blocks that for this specific kind of connection, for every app, not just this one.
+""")
+
     with st.form("email_creds_form"):
         e_email = st.text_input("Email address", value=current_email or "")
         e_server = st.text_input(
@@ -749,18 +766,31 @@ def render_settings():
             type="password",
             placeholder="Leave blank to keep your current saved password",
         )
-        if st.form_submit_button("💾 Save Email Credentials"):
+
+        if st.form_submit_button("🔌 Save & Test Connection", type="primary"):
             if not e_email.strip():
                 st.warning("Enter an email address.")
             else:
-                update_user_email_credentials(
-                    st.session_state.logged_in_user_id,
-                    e_email.strip(),
-                    e_server.strip(),
-                    e_password or None,
-                )
-                st.toast("Email credentials saved.")
-                st.rerun()
+                password_to_test = e_password or current_password
+                if not password_to_test:
+                    st.warning(
+                        "Enter an App Password — there's no saved one yet to fall back on."
+                    )
+                else:
+                    with st.spinner("Testing connection..."):
+                        success, message = test_connection(
+                            e_email.strip(), e_server.strip(), password_to_test
+                        )
+                    if success:
+                        update_user_email_credentials(
+                            st.session_state.logged_in_user_id,
+                            e_email.strip(),
+                            e_server.strip(),
+                            e_password or None,
+                        )
+                        st.success(f"✅ {message}")
+                    else:
+                        st.error(f"❌ {message}")
 
     st.subheader("Encrypted PII Vault")
     key = os.getenv("ENCRYPTION_KEY")

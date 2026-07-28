@@ -269,3 +269,52 @@ def draft_reply(sender: str, subject: str, body: str, job: dict = None) -> str:
         ),
     )
     return json.loads(raw_text).get("reply", "")
+
+
+def test_connection(imap_email: str, imap_server: str, imap_password: str) -> tuple:
+    """
+    Attempts a live IMAP login and returns (success, message) — the message
+    is a specific, human-readable diagnosis, not a raw exception. A wrong
+    password, a wrong server address, and a genuine network problem all look
+    different, so whoever's testing this knows exactly what to fix.
+    """
+    try:
+        conn = imaplib.IMAP4_SSL(imap_server, timeout=10)
+    except Exception as e:
+        return (
+            False,
+            f"Couldn't reach '{imap_server}' — check the server address. ({e})",
+        )
+
+    try:
+        conn.login(imap_email, imap_password)
+    except imaplib.IMAP4.error as e:
+        error_text = str(e)
+        try:
+            conn.logout()
+        except Exception:
+            pass
+        if (
+            "AUTHENTICATIONFAILED" in error_text.upper()
+            or "invalid credentials" in error_text.lower()
+        ):
+            return (
+                False,
+                "Login rejected — this usually means the password isn't a valid App Password, or 2-Step Verification isn't turned on for this account yet.",
+            )
+        return False, f"Login failed: {error_text}"
+    except Exception as e:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+        return False, f"Unexpected error while connecting: {e}"
+
+    try:
+        conn.select("INBOX")
+    except Exception as e:
+        conn.logout()
+        return False, f"Logged in, but couldn't open the inbox: {e}"
+
+    conn.logout()
+    return True, "Connected successfully — inbox is reachable."
