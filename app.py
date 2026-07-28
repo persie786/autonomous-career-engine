@@ -80,7 +80,6 @@ from modules.persona_builder import create_persona_variant
 from utils.blob_store import init_blob_store
 from modules.email_monitor import (
     check_inbox,
-    list_recent_emails,
     draft_reply,
     match_job_for_email,
     test_connection,
