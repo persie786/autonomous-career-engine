@@ -110,7 +110,12 @@ def init_db():
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         )
     """)
-
+    cursor.execute("PRAGMA table_info(users)")
+    existing_user_columns = {row[1] for row in cursor.fetchall()}
+    if "smtp_server" not in existing_user_columns:
+        cursor.execute(
+            "ALTER TABLE users ADD COLUMN smtp_server TEXT DEFAULT 'smtp.gmail.com'"
+        )
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS jobs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -378,20 +383,24 @@ def decrypt_data(ciphertext: str) -> str:
 
 
 def update_user_email_credentials(
-    user_id: int, imap_email: str, imap_server: str, imap_password_plain: str = None
+    user_id: int,
+    imap_email: str,
+    imap_server: str,
+    smtp_server: str,
+    imap_password_plain: str = None,
 ):
     conn = get_connection()
     cursor = conn.cursor()
     if imap_password_plain:
         encrypted = encrypt_data(imap_password_plain)
         cursor.execute(
-            "UPDATE users SET imap_email = ?, imap_server = ?, imap_password_encrypted = ? WHERE id = ?",
-            (imap_email, imap_server, encrypted, user_id),
+            "UPDATE users SET imap_email = ?, imap_server = ?, smtp_server = ?, imap_password_encrypted = ? WHERE id = ?",
+            (imap_email, imap_server, smtp_server, encrypted, user_id),
         )
     else:
         cursor.execute(
-            "UPDATE users SET imap_email = ?, imap_server = ? WHERE id = ?",
-            (imap_email, imap_server, user_id),
+            "UPDATE users SET imap_email = ?, imap_server = ?, smtp_server = ? WHERE id = ?",
+            (imap_email, imap_server, smtp_server, user_id),
         )
     conn.commit()
     conn.close()
@@ -402,16 +411,17 @@ def get_user_email_credentials(user_id: int) -> tuple:
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT imap_email, imap_server, imap_password_encrypted FROM users WHERE id = ?",
+        "SELECT imap_email, imap_server, smtp_server, imap_password_encrypted FROM users WHERE id = ?",
         (user_id,),
     )
     row = cursor.fetchone()
     conn.close()
     if not row or not row["imap_password_encrypted"]:
-        return None, None, None
+        return None, None, None, None
     return (
         row["imap_email"],
         row["imap_server"] or "imap.gmail.com",
+        row["smtp_server"] or "smtp.gmail.com",
         decrypt_data(row["imap_password_encrypted"]),
     )
 

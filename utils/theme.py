@@ -6,6 +6,10 @@ header[data-testid="stHeader"] { background: transparent; }
 .block-container { padding-top: 1.75rem; padding-bottom: 2.5rem; max-width: 1180px; }
 div[data-testid="stVerticalBlock"] { gap: 0.6rem; }
 
+div[class*="st-key-card_mail_unread_"] {
+  border-left: 3px solid #F2A93B;
+}
+
 /* ---------- Typography rhythm ---------- */
 h1, h2, h3 { letter-spacing: -0.02em; }
 [data-testid="stCaptionContainer"] { font-family: 'JetBrains Mono', monospace; }

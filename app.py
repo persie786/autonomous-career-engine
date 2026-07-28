@@ -53,9 +53,12 @@ from modules.cv_generator import generate_for_job
 from database.db_handler import get_job_by_id
 from modules.email_monitor import (
     check_inbox,
-    list_recent_emails,
+    list_emails,
     draft_reply,
     match_job_for_email,
+    test_connection,
+    set_read_status,
+    send_email,
 )
 from modules.email_monitor import check_inbox
 from modules.report_generator import generate_weekly_report
@@ -82,6 +85,7 @@ from modules.email_monitor import (
     match_job_for_email,
     test_connection,
 )
+from email.utils import parseaddr
 
 load_dotenv()
 logger = setup_logger("app")
@@ -744,8 +748,8 @@ def render_settings():
         "Your own email, used only to scan for replies about your own applications. Stored encrypted — no one else can read it."
     )
 
-    current_email, current_server, current_password = get_user_email_credentials(
-        st.session_state.logged_in_user_id
+    ccurrent_email, current_server, current_smtp, current_password = (
+        get_user_email_credentials(st.session_state.logged_in_user_id)
     )
 
     with st.expander("❓ Where do I get an App Password? (takes ~2 minutes)"):
@@ -756,10 +760,16 @@ def render_settings():
 4. Paste that code below. **Not your regular Google password** — Google blocks that for this specific kind of connection, for every app, not just this one.
 """)
 
+    current_email, current_server, current_smtp, current_password = (
+        get_user_email_credentials(st.session_state.logged_in_user_id)
+    )
     with st.form("email_creds_form"):
         e_email = st.text_input("Email address", value=current_email or "")
         e_server = st.text_input(
-            "IMAP Server", value=current_server or "imap.gmail.com"
+            "IMAP Server (reading)", value=current_server or "imap.gmail.com"
+        )
+        e_smtp = st.text_input(
+            "SMTP Server (sending)", value=current_smtp or "smtp.gmail.com"
         )
         e_password = st.text_input(
             "App Password",
@@ -779,13 +789,17 @@ def render_settings():
                 else:
                     with st.spinner("Testing connection..."):
                         success, message = test_connection(
-                            e_email.strip(), e_server.strip(), password_to_test
+                            e_email.strip(),
+                            e_server.strip(),
+                            e_smtp.strip(),
+                            password_to_test,
                         )
                     if success:
                         update_user_email_credentials(
                             st.session_state.logged_in_user_id,
                             e_email.strip(),
                             e_server.strip(),
+                            e_smtp.strip(),
                             e_password or None,
                         )
                         st.success(f"✅ {message}")
@@ -1569,40 +1583,116 @@ def render_applied_and_inbox():
     st.divider()
     st.subheader("📧 Inbox")
 
-    col1, col2 = st.columns([1, 5])
+    if "inbox_offset" not in st.session_state:
+        st.session_state.inbox_offset = 0
+
+    col1, col2, col3, col4 = st.columns([1, 3, 2, 1.2])
     if col1.button("🔄 Refresh"):
-        try:
-            st.session_state.recent_emails = list_recent_emails(limit=20)
-            st.toast("Inbox refreshed.")
-        except Exception as e:
-            st.error(f"Couldn't fetch inbox: {e}")
+        st.session_state.inbox_offset = 0
         st.rerun()
+    search_term = col2.text_input(
+        "Search", placeholder="🔍 Subject or sender...", label_visibility="collapsed"
+    )
+    unread_only = col3.checkbox("Unread only")
+    if col4.button("✏️ Compose"):
+        st.session_state.show_compose = not st.session_state.get("show_compose", False)
 
-    if "recent_emails" not in st.session_state:
-        try:
-            st.session_state.recent_emails = list_recent_emails(limit=20)
-        except Exception as e:
-            st.session_state.recent_emails = []
-            st.warning(f"Couldn't load inbox: {e}")
+    if st.session_state.get("show_compose"):
+        with st.container(key="glass_compose"):
+            st.markdown("**New Message**")
+            with st.form("compose_form", clear_on_submit=True):
+                c_to = st.text_input("To")
+                c_subject = st.text_input("Subject")
+                c_body = st.text_area("Message", height=140)
+                cs1, cs2 = st.columns(2)
+                send_new = cs1.form_submit_button("📤 Send", type="primary")
+                cancel_new = cs2.form_submit_button("Cancel")
+            if send_new:
+                if not c_to.strip() or not c_subject.strip():
+                    st.warning("To and Subject are required.")
+                else:
+                    try:
+                        send_email(c_to.strip(), c_subject.strip(), c_body)
+                        st.toast("Sent.")
+                        st.session_state.show_compose = False
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Send failed: {e}")
+            if cancel_new:
+                st.session_state.show_compose = False
+                st.rerun()
 
-    if not st.session_state.recent_emails:
-        st.info("No messages loaded — hit Refresh.")
-    else:
-        for mail in st.session_state.recent_emails:
-            with st.container(key=f"card_mail_{mail['uid']}"):
-                st.markdown(f"**{mail['subject']}**")
-                st.caption(f"From: {mail['sender']} — {mail['date']}")
-                with st.expander("View message"):
-                    st.write(mail["body"][:2000])
+    try:
+        emails, total_count = list_emails(
+            limit=10,
+            offset=st.session_state.inbox_offset,
+            unread_only=unread_only,
+            search_term=search_term or None,
+        )
+    except Exception as e:
+        st.error(f"Couldn't load inbox: {e}")
+        emails, total_count = [], 0
 
-                matched_job = match_job_for_email(mail["subject"], mail["sender"], jobs)
-                if matched_job:
-                    st.caption(
-                        f"🔗 Looks related to: **{matched_job['role']}** at **{matched_job['company']}**"
+    if not emails and total_count == 0:
+        st.info("No messages match — try clearing the search or the Unread filter.")
+
+    for mail in emails:
+        card_key = (
+            f"card_mail_unread_{mail['uid']}"
+            if not mail["seen"]
+            else f"card_mail_read_{mail['uid']}"
+        )
+        with st.container(key=card_key):
+            unread_dot = "🔵 " if not mail["seen"] else ""
+            st.markdown(f"{unread_dot}**{mail['subject'] or '(no subject)'}**")
+            st.caption(f"From: {mail['sender']} — {mail['date']}")
+
+            matched_job = match_job_for_email(mail["subject"], mail["sender"], jobs)
+            if matched_job:
+                st.caption(
+                    f"🔗 Related to: **{matched_job['role']}** at **{matched_job['company']}**"
+                )
+            if mail["attachments"]:
+                st.caption(f"📎 {len(mail['attachments'])} attachment(s)")
+
+            with st.expander("View message"):
+                st.text(mail["body"][:3000])
+                for att in mail["attachments"]:
+                    st.download_button(
+                        f"⬇️ {att['filename']}",
+                        data=att["content"],
+                        file_name=att["filename"],
+                        key=f"att_{mail['uid']}_{att['filename']}",
                     )
 
-                draft_key = f"draft_{mail['uid']}"
-                if st.button("✨ Draft AI Reply", key=f"draftbtn_{mail['uid']}"):
+            b1, b2 = st.columns(2)
+            read_label = "📖 Mark Unread" if mail["seen"] else "✅ Mark Read"
+            if b1.button(
+                read_label, key=f"toggleread_{mail['uid']}", use_container_width=True
+            ):
+                set_read_status(mail["uid"], not mail["seen"])
+                st.rerun()
+            if b2.button(
+                "↩️ Reply", key=f"replytoggle_{mail['uid']}", use_container_width=True
+            ):
+                st.session_state[f"replying_{mail['uid']}"] = not st.session_state.get(
+                    f"replying_{mail['uid']}", False
+                )
+
+            if st.session_state.get(f"replying_{mail['uid']}"):
+                draft_key = f"ai_draft_{mail['uid']}"
+                reply_text = st.text_area(
+                    "Your reply",
+                    value=st.session_state.get(draft_key, ""),
+                    key=f"reply_text_{mail['uid']}",
+                    height=140,
+                )
+                r1, r2 = st.columns(2)
+                if r1.button(
+                    "✨ AI Draft",
+                    key=f"aidraft_{mail['uid']}",
+                    use_container_width=True,
+                ):
                     with st.spinner("Drafting..."):
                         try:
                             st.session_state[draft_key] = draft_reply(
@@ -1611,16 +1701,47 @@ def render_applied_and_inbox():
                                 mail["body"],
                                 job=matched_job,
                             )
+                            st.rerun()
                         except Exception as e:
                             st.error(f"Draft failed: {e}")
-
-                if draft_key in st.session_state:
-                    st.text_area(
-                        "Drafted reply — copy and send from your own email client",
-                        value=st.session_state[draft_key],
-                        key=f"draftarea_{mail['uid']}",
-                        height=150,
+                if r2.button(
+                    "📤 Send Reply",
+                    key=f"sendreply_{mail['uid']}",
+                    type="primary",
+                    use_container_width=True,
+                ):
+                    sender_addr = parseaddr(mail["sender"])[1]
+                    reply_subject = (
+                        mail["subject"]
+                        if mail["subject"].lower().startswith("re:")
+                        else f"Re: {mail['subject']}"
                     )
+                    try:
+                        send_email(
+                            sender_addr,
+                            reply_subject,
+                            reply_text,
+                            in_reply_to=mail["message_id"],
+                            references=mail["message_id"],
+                        )
+                        st.toast("Reply sent.")
+                        st.session_state[f"replying_{mail['uid']}"] = False
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Send failed: {e}")
+
+    p1, p2, p3 = st.columns([1, 3, 1])
+    if p1.button("⬅️ Newer", disabled=st.session_state.inbox_offset == 0):
+        st.session_state.inbox_offset = max(0, st.session_state.inbox_offset - 10)
+        st.rerun()
+    p2.caption(
+        f"Showing {st.session_state.inbox_offset + 1}–{min(st.session_state.inbox_offset + 10, total_count)} of {total_count}"
+    )
+    if p3.button(
+        "Older ➡️", disabled=st.session_state.inbox_offset + 10 >= total_count
+    ):
+        st.session_state.inbox_offset += 10
+        st.rerun()
 
 
 def render_profile():

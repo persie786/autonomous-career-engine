@@ -9,6 +9,9 @@ from database.db_handler import get_user_email_credentials
 from database.db_handler import get_jobs, update_job_status, log_activity
 from utils.ai_router import generate_json
 from utils.logger import setup_logger
+import smtplib
+from email.mime.text import MIMEText
+from email.utils import make_msgid, parseaddr
 
 load_dotenv()
 logger = setup_logger("email_monitor")
@@ -271,50 +274,173 @@ def draft_reply(sender: str, subject: str, body: str, job: dict = None) -> str:
     return json.loads(raw_text).get("reply", "")
 
 
-def test_connection(imap_email: str, imap_server: str, imap_password: str) -> tuple:
-    """
-    Attempts a live IMAP login and returns (success, message) — the message
-    is a specific, human-readable diagnosis, not a raw exception. A wrong
-    password, a wrong server address, and a genuine network problem all look
-    different, so whoever's testing this knows exactly what to fix.
-    """
+def test_connection(
+    imap_email: str, imap_server: str, smtp_server: str, imap_password: str
+) -> tuple:
     try:
         conn = imaplib.IMAP4_SSL(imap_server, timeout=10)
     except Exception as e:
         return (
             False,
-            f"Couldn't reach '{imap_server}' — check the server address. ({e})",
+            f"Couldn't reach '{imap_server}' — check the IMAP server address. ({e})",
         )
 
     try:
         conn.login(imap_email, imap_password)
     except imaplib.IMAP4.error as e:
-        error_text = str(e)
         try:
             conn.logout()
         except Exception:
             pass
+        error_text = str(e)
         if (
             "AUTHENTICATIONFAILED" in error_text.upper()
             or "invalid credentials" in error_text.lower()
         ):
             return (
                 False,
-                "Login rejected — this usually means the password isn't a valid App Password, or 2-Step Verification isn't turned on for this account yet.",
+                "Login rejected — this usually means the password isn't a valid App Password, or 2-Step Verification isn't turned on yet.",
             )
-        return False, f"Login failed: {error_text}"
+        return False, f"IMAP login failed: {error_text}"
     except Exception as e:
-        try:
-            conn.logout()
-        except Exception:
-            pass
-        return False, f"Unexpected error while connecting: {e}"
+        return False, f"Unexpected IMAP error: {e}"
 
     try:
         conn.select("INBOX")
     except Exception as e:
         conn.logout()
         return False, f"Logged in, but couldn't open the inbox: {e}"
-
     conn.logout()
-    return True, "Connected successfully — inbox is reachable."
+
+    try:
+        with smtplib.SMTP(smtp_server, 587, timeout=10) as server:
+            server.starttls()
+            server.login(imap_email, imap_password)
+    except Exception as e:
+        return (
+            False,
+            f"Inbox reading works, but sending won't — SMTP login to '{smtp_server}' failed: {e}",
+        )
+
+    return True, "Connected successfully — reading and sending both verified."
+
+
+def _extract_attachments(msg) -> list:
+    attachments = []
+    if msg.is_multipart():
+        for part in msg.walk():
+            if "attachment" in str(part.get("Content-Disposition", "")).lower():
+                filename = part.get_filename()
+                if filename:
+                    payload = part.get_payload(decode=True)
+                    if payload:
+                        attachments.append(
+                            {"filename": _decode_subject(filename), "content": payload}
+                        )
+    return attachments
+
+
+def list_emails(
+    limit: int = 10, offset: int = 0, unread_only: bool = False, search_term: str = None
+) -> tuple:
+    """
+    Paginated, filterable inbox browsing — distinct from check_inbox()'s
+    incremental UID-tracked scan used for automated classification. Returns
+    (emails, total_count_matching_filter).
+    """
+    imap_email, imap_server, smtp_server, imap_password = get_user_email_credentials(
+        get_current_user()
+    )
+    if not imap_email or not imap_password:
+        raise ValueError("No email credentials saved yet — add them in Settings first.")
+
+    conn = imaplib.IMAP4_SSL(imap_server)
+    try:
+        conn.login(imap_email, imap_password)
+        conn.select("INBOX")
+
+        criteria = []
+        if unread_only:
+            criteria.append("UNSEEN")
+        if search_term:
+            escaped = search_term.replace('"', "")
+            criteria.append(f'(OR SUBJECT "{escaped}" FROM "{escaped}")')
+        search_query = " ".join(criteria) if criteria else "ALL"
+
+        result, data = conn.uid("search", None, search_query)
+        if result != "OK" or not data[0]:
+            return [], 0
+
+        all_uids = sorted((int(u) for u in data[0].split()), reverse=True)
+        total_count = len(all_uids)
+        page_uids = all_uids[offset : offset + limit]
+
+        emails = []
+        for uid in page_uids:
+            result, msg_data = conn.uid("fetch", str(uid), "(RFC822 FLAGS)")
+            if result != "OK" or not msg_data or msg_data[0] is None:
+                continue
+            flags_blob = str(msg_data[0][0])
+            msg = email.message_from_bytes(msg_data[0][1])
+            emails.append(
+                {
+                    "uid": uid,
+                    "subject": _decode_subject(msg.get("Subject")),
+                    "sender": msg.get("From", ""),
+                    "date": msg.get("Date", ""),
+                    "body": _extract_body(msg),
+                    "message_id": msg.get("Message-ID", ""),
+                    "seen": "\\Seen" in flags_blob,
+                    "attachments": _extract_attachments(msg),
+                }
+            )
+        return emails, total_count
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+
+
+def set_read_status(uid: int, seen: bool):
+    imap_email, imap_server, smtp_server, imap_password = get_user_email_credentials(
+        get_current_user()
+    )
+    conn = imaplib.IMAP4_SSL(imap_server)
+    try:
+        conn.login(imap_email, imap_password)
+        conn.select("INBOX")
+        conn.uid("store", str(uid), "+FLAGS" if seen else "-FLAGS", "(\\Seen)")
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+
+
+def send_email(
+    to_address: str,
+    subject: str,
+    body: str,
+    in_reply_to: str = None,
+    references: str = None,
+):
+    imap_email, imap_server, smtp_server, imap_password = get_user_email_credentials(
+        get_current_user()
+    )
+    if not imap_email or not imap_password:
+        raise ValueError("No email credentials saved yet — add them in Settings first.")
+
+    msg = MIMEText(body)
+    msg["Subject"] = subject
+    msg["From"] = imap_email
+    msg["To"] = to_address
+    msg["Message-ID"] = make_msgid()
+    if in_reply_to:
+        msg["In-Reply-To"] = in_reply_to
+        msg["References"] = references or in_reply_to
+
+    with smtplib.SMTP(smtp_server, 587, timeout=15) as server:
+        server.starttls()
+        server.login(imap_email, imap_password)
+        server.sendmail(imap_email, [to_address], msg.as_string())
