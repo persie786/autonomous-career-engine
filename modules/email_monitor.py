@@ -204,46 +204,6 @@ if __name__ == "__main__":
     print(check_inbox())
 
 
-def list_recent_emails(limit: int = 20) -> list[dict]:
-    """Fetches the most recent N messages regardless of processed-state —
-    for browsing/reading, distinct from check_inbox()'s incremental,
-    UID-tracked scan used for automated classification."""
-    imap_email, imap_server, imap_pass = get_user_email_credentials(get_current_user())
-    if not imap_email or not imap_pass:
-        raise ValueError("No email credentials saved yet — add them in Settings first.")
-
-    conn = imaplib.IMAP4_SSL(imap_server)
-    emails = []
-    try:
-        conn.login(imap_email, imap_pass)
-        conn.select("INBOX")
-        result, data = conn.uid("search", None, "ALL")
-        if result != "OK" or not data[0]:
-            return []
-
-        uids = sorted((int(u) for u in data[0].split()), reverse=True)[:limit]
-        for uid in uids:
-            result, msg_data = conn.uid("fetch", str(uid), "(RFC822)")
-            if result != "OK" or not msg_data or msg_data[0] is None:
-                continue
-            msg = email.message_from_bytes(msg_data[0][1])
-            emails.append(
-                {
-                    "uid": uid,
-                    "subject": _decode_subject(msg.get("Subject")),
-                    "sender": msg.get("From", ""),
-                    "date": msg.get("Date", ""),
-                    "body": _extract_body(msg),
-                }
-            )
-    finally:
-        try:
-            conn.logout()
-        except Exception:
-            pass
-    return emails
-
-
 REPLY_DRAFT_PROMPT = """Draft a brief, professional reply to this email as the job \
 candidate. Match tone to context — gracious and concise if it's a rejection, enthusiastic \
 and available if it's an interview invite, neutral and helpful otherwise. Don't invent \
