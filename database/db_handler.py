@@ -116,6 +116,8 @@ def init_db():
         cursor.execute(
             "ALTER TABLE users ADD COLUMN smtp_server TEXT DEFAULT 'smtp.gmail.com'"
         )
+    if "gmail_token_json" not in existing_user_columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN gmail_token_json TEXT")
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS jobs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

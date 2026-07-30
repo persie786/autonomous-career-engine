@@ -56,7 +56,6 @@ from modules.email_monitor import (
     list_emails,
     draft_reply,
     match_job_for_email,
-    test_connection,
     set_read_status,
     send_email,
 )
@@ -82,9 +81,15 @@ from modules.email_monitor import (
     check_inbox,
     draft_reply,
     match_job_for_email,
-    test_connection,
 )
 from email.utils import parseaddr
+from modules.gmail_api import (
+    get_authorization_url,
+    exchange_code_for_token,
+    save_user_gmail_token,
+    is_connected,
+    disconnect,
+)
 
 load_dotenv()
 logger = setup_logger("app")
@@ -167,6 +172,15 @@ if "logged_in_user_id" not in st.session_state:
     st.stop()
 
 set_current_user(st.session_state.logged_in_user_id)
+if "code" in st.query_params:
+    try:
+        token_dict = exchange_code_for_token(st.query_params["code"])
+        save_user_gmail_token(st.session_state.logged_in_user_id, token_dict)
+        st.query_params.clear()
+        st.success("Gmail connected!")
+    except Exception as e:
+        st.query_params.clear()
+        st.error(f"Gmail connection failed: {e}")
 
 if "app_initialized" not in st.session_state:
     apply_ghosting_webhook()
@@ -742,68 +756,22 @@ def render_settings():
         save_settings(settings)
         log_activity("settings", f"Confidence threshold changed to {threshold}")
         st.toast(f"Confidence threshold set to {threshold:.0%}")
-    st.subheader("Email Connection")
+
+    st.subheader("Email Connection (Gmail)")
     st.caption(
-        "Your own email, used only to scan for replies about your own applications. Stored encrypted — no one else can read it."
+        "Connect your Google account to read and reply to emails about your applications."
     )
-
-    ccurrent_email, current_server, current_smtp, current_password = (
-        get_user_email_credentials(st.session_state.logged_in_user_id)
-    )
-
-    with st.expander("❓ Where do I get an App Password? (takes ~2 minutes)"):
-        st.markdown("""
-1. Turn on **2-Step Verification** at [myaccount.google.com/security](https://myaccount.google.com/security), if it isn't on already.
-2. Go to [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords).
-3. Create one — name it anything, e.g. "career-engine" — and copy the 16-character code shown.
-4. Paste that code below. **Not your regular Google password** — Google blocks that for this specific kind of connection, for every app, not just this one.
-""")
-
-    current_email, current_server, current_smtp, current_password = (
-        get_user_email_credentials(st.session_state.logged_in_user_id)
-    )
-    with st.form("email_creds_form"):
-        e_email = st.text_input("Email address", value=current_email or "")
-        e_server = st.text_input(
-            "IMAP Server (reading)", value=current_server or "imap.gmail.com"
+    if is_connected(st.session_state.logged_in_user_id):
+        st.success("✅ Gmail connected.")
+        if st.button("🔌 Disconnect Gmail"):
+            disconnect(st.session_state.logged_in_user_id)
+            st.rerun()
+    else:
+        auth_url, _ = get_authorization_url()
+        st.link_button("🔌 Connect Google Account", auth_url, type="primary")
+        st.caption(
+            "You'll be taken to Google's consent screen, then brought straight back here once approved."
         )
-        e_smtp = st.text_input(
-            "SMTP Server (sending)", value=current_smtp or "smtp.gmail.com"
-        )
-        e_password = st.text_input(
-            "App Password",
-            type="password",
-            placeholder="Leave blank to keep your current saved password",
-        )
-
-        if st.form_submit_button("🔌 Save & Test Connection", type="primary"):
-            if not e_email.strip():
-                st.warning("Enter an email address.")
-            else:
-                password_to_test = e_password or current_password
-                if not password_to_test:
-                    st.warning(
-                        "Enter an App Password — there's no saved one yet to fall back on."
-                    )
-                else:
-                    with st.spinner("Testing connection..."):
-                        success, message = test_connection(
-                            e_email.strip(),
-                            e_server.strip(),
-                            e_smtp.strip(),
-                            password_to_test,
-                        )
-                    if success:
-                        update_user_email_credentials(
-                            st.session_state.logged_in_user_id,
-                            e_email.strip(),
-                            e_server.strip(),
-                            e_smtp.strip(),
-                            e_password or None,
-                        )
-                        st.success(f"✅ {message}")
-                    else:
-                        st.error(f"❌ {message}")
 
     st.subheader("Encrypted PII Vault")
     key = os.getenv("ENCRYPTION_KEY")
@@ -1582,15 +1550,21 @@ def render_applied_and_inbox():
     st.divider()
     st.subheader("📧 Inbox")
 
-    if "inbox_offset" not in st.session_state:
-        st.session_state.inbox_offset = 0
+    if not is_connected(st.session_state.logged_in_user_id):
+        st.info(
+            "Gmail isn't connected yet — connect it in Settings to see your inbox here."
+        )
+        return
 
     col1, col2, col3, col4 = st.columns([1, 3, 2, 1.2])
     if col1.button("🔄 Refresh"):
-        st.session_state.inbox_offset = 0
+        st.session_state.loaded_emails = []
+        st.session_state.next_page_token = None
         st.rerun()
     search_term = col2.text_input(
-        "Search", placeholder="🔍 Subject or sender...", label_visibility="collapsed"
+        "Search",
+        placeholder="🔍 Gmail search (e.g. from:company.com)",
+        label_visibility="collapsed",
     )
     unread_only = col3.checkbox("Unread only")
     if col4.button("✏️ Compose"):
@@ -1621,21 +1595,28 @@ def render_applied_and_inbox():
                 st.session_state.show_compose = False
                 st.rerun()
 
-    try:
-        emails, total_count = list_emails(
-            limit=10,
-            offset=st.session_state.inbox_offset,
-            unread_only=unread_only,
-            search_term=search_term or None,
-        )
-    except Exception as e:
-        st.error(f"Couldn't load inbox: {e}")
-        emails, total_count = [], 0
+    filter_key = f"{unread_only}::{search_term}"
+    if st.session_state.get("last_inbox_filter_key") != filter_key:
+        st.session_state.loaded_emails = []
+        st.session_state.next_page_token = None
+        st.session_state.last_inbox_filter_key = filter_key
 
-    if not emails and total_count == 0:
+    if not st.session_state.get("loaded_emails"):
+        try:
+            emails, next_token = list_emails(
+                limit=10, unread_only=unread_only, search_term=search_term or None
+            )
+            st.session_state.loaded_emails = emails
+            st.session_state.next_page_token = next_token
+        except Exception as e:
+            st.error(f"Couldn't load inbox: {e}")
+            st.session_state.loaded_emails = []
+            st.session_state.next_page_token = None
+
+    if not st.session_state.loaded_emails:
         st.info("No messages match — try clearing the search or the Unread filter.")
 
-    for mail in emails:
+    for mail in st.session_state.loaded_emails:
         card_key = (
             f"card_mail_unread_{mail['uid']}"
             if not mail["seen"]
@@ -1670,6 +1651,7 @@ def render_applied_and_inbox():
                 read_label, key=f"toggleread_{mail['uid']}", use_container_width=True
             ):
                 set_read_status(mail["uid"], not mail["seen"])
+                mail["seen"] = not mail["seen"]
                 st.rerun()
             if b2.button(
                 "↩️ Reply", key=f"replytoggle_{mail['uid']}", use_container_width=True
@@ -1722,6 +1704,7 @@ def render_applied_and_inbox():
                             reply_text,
                             in_reply_to=mail["message_id"],
                             references=mail["message_id"],
+                            thread_id=mail["thread_id"],
                         )
                         st.toast("Reply sent.")
                         st.session_state[f"replying_{mail['uid']}"] = False
@@ -1729,18 +1712,17 @@ def render_applied_and_inbox():
                     except Exception as e:
                         st.error(f"Send failed: {e}")
 
-    p1, p2, p3 = st.columns([1, 3, 1])
-    if p1.button("⬅️ Newer", disabled=st.session_state.inbox_offset == 0):
-        st.session_state.inbox_offset = max(0, st.session_state.inbox_offset - 10)
-        st.rerun()
-    p2.caption(
-        f"Showing {st.session_state.inbox_offset + 1}–{min(st.session_state.inbox_offset + 10, total_count)} of {total_count}"
-    )
-    if p3.button(
-        "Older ➡️", disabled=st.session_state.inbox_offset + 10 >= total_count
-    ):
-        st.session_state.inbox_offset += 10
-        st.rerun()
+    if st.session_state.get("next_page_token"):
+        if st.button("Load More"):
+            more_emails, next_token = list_emails(
+                limit=10,
+                page_token=st.session_state.next_page_token,
+                unread_only=unread_only,
+                search_term=search_term or None,
+            )
+            st.session_state.loaded_emails.extend(more_emails)
+            st.session_state.next_page_token = next_token
+            st.rerun()
 
 
 def render_profile():

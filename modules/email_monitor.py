@@ -1,26 +1,14 @@
-import os
 import json
-import imaplib
-import email
-from email.header import decode_header
-from dotenv import load_dotenv
-from utils.user_context import get_current_user
-from database.db_handler import get_user_email_credentials
-from database.db_handler import get_jobs, update_job_status, log_activity
 from utils.ai_router import generate_json
+from database.db_handler import get_jobs, update_job_status, log_activity
+from modules.gmail_api import (
+    list_emails as _gmail_list,
+    send_email as _gmail_send,
+    set_read_status as _gmail_set_read,
+)
 from utils.logger import setup_logger
-import smtplib
-from email.mime.text import MIMEText
-from email.utils import make_msgid, parseaddr
 
-load_dotenv()
 logger = setup_logger("email_monitor")
-
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-STATE_PATH = os.path.join(PROJECT_ROOT, "data", "email_state.json")
-
-IMAP_SERVER = os.getenv("IMAP_SERVER", "imap.gmail.com")
-
 
 CLASSIFICATION_PROMPT = """You are classifying one email that may relate to a job application \
 for the role of "{role}" at "{company}". Decide which category applies:
@@ -36,58 +24,7 @@ Email body (may be truncated):
 {body}"""
 
 
-def _load_state() -> dict:
-    if not os.path.exists(STATE_PATH):
-        return {"last_uid": 0}
-    with open(STATE_PATH, "r") as f:
-        return json.load(f)
-
-
-def _save_state(state: dict):
-    os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
-    with open(STATE_PATH, "w") as f:
-        json.dump(state, f, indent=2)
-
-
-def _decode_subject(raw_subject) -> str:
-    parts = decode_header(raw_subject or "")
-    return "".join(
-        (
-            text.decode(encoding or "utf-8", errors="replace")
-            if isinstance(text, bytes)
-            else text
-        )
-        for text, encoding in parts
-    )
-
-
-def _extract_body(msg) -> str:
-    if msg.is_multipart():
-        for part in msg.walk():
-            if part.get_content_type() == "text/plain" and not part.get(
-                "Content-Disposition"
-            ):
-                try:
-                    return part.get_payload(decode=True).decode(
-                        part.get_content_charset() or "utf-8", errors="replace"
-                    )
-                except Exception:
-                    continue
-        return ""
-    try:
-        return msg.get_payload(decode=True).decode(
-            msg.get_content_charset() or "utf-8", errors="replace"
-        )
-    except Exception:
-        return ""
-
-
-def match_job_for_email(
-    subject: str, sender: str, applied_jobs: list[dict]
-) -> dict | None:
-    """Finds the single Applied job this email most plausibly relates to, by
-    checking whether the company name appears in the sender or subject.
-    Deliberately conservative — returns None rather than guess."""
+def match_job_for_email(subject: str, sender: str, applied_jobs: list) -> dict | None:
     haystack = f"{sender} {subject}".lower()
     for job in applied_jobs:
         if job["company"].lower() in haystack:
@@ -95,16 +32,44 @@ def match_job_for_email(
     return None
 
 
-def check_inbox() -> dict:
-    """
-    Scans for emails newer than the last run, matches each to an Applied job
-    by company name, classifies matched ones, and updates job status. This
-    is what the Dashboard's 'Check Inbox' button calls.
-    """
-    imap_email, imap_server, imap_pass = get_user_email_credentials(get_current_user())
-    if not imap_email or not imap_pass:
-        raise ValueError("No email credentials saved yet — add them in Settings first.")
+def list_emails(
+    limit: int = 10,
+    page_token: str = None,
+    unread_only: bool = False,
+    search_term: str = None,
+) -> tuple:
+    return _gmail_list(
+        limit=limit,
+        page_token=page_token,
+        unread_only=unread_only,
+        search_term=search_term,
+    )
 
+
+def set_read_status(message_id: str, seen: bool):
+    _gmail_set_read(message_id, seen)
+
+
+def send_email(
+    to_address: str,
+    subject: str,
+    body: str,
+    in_reply_to: str = None,
+    references: str = None,
+    thread_id: str = None,
+):
+    _gmail_send(
+        to_address,
+        subject,
+        body,
+        in_reply_to=in_reply_to,
+        references=references,
+        thread_id=thread_id,
+    )
+
+
+def check_inbox() -> dict:
+    applied_jobs = get_jobs(status="Applied")
     counts = {
         "scanned": 0,
         "matched": 0,
@@ -112,96 +77,56 @@ def check_inbox() -> dict:
         "interviews": 0,
         "flagged": 0,
     }
-
-    applied_jobs = get_jobs(status="Applied")
     if not applied_jobs:
         return counts
 
-    state = _load_state()
-    conn = imaplib.IMAP4_SSL(imap_server)
+    emails, _ = _gmail_list(limit=20, unread_only=True)
+    for mail in emails:
+        counts["scanned"] += 1
+        job = match_job_for_email(mail["subject"], mail["sender"], applied_jobs)
+        if job is None:
+            continue
+        counts["matched"] += 1
 
-    try:
-        conn.login(imap_email, imap_pass)
-        conn.select("INBOX")
-
-        result, data = conn.uid("search", None, f'UID {state["last_uid"] + 1}:*')
-        if result != "OK" or not data[0]:
-            return counts
-
-        # IMAP's UID range search can include the boundary UID itself — filter defensively.
-        uids = sorted(
-            u for u in (int(x) for x in data[0].split()) if u > state["last_uid"]
-        )
-
-        for uid in uids:
-            result, msg_data = conn.uid("fetch", str(uid), "(RFC822)")
-            if result != "OK" or not msg_data or msg_data[0] is None:
-                continue
-
-            msg = email.message_from_bytes(msg_data[0][1])
-            subject = _decode_subject(msg.get("Subject"))
-            sender = msg.get("From", "")
-            body = _extract_body(msg)[:2000]
-            counts["scanned"] += 1
-
-            job = match_job_for_email(subject, sender, applied_jobs)
-            if job is None:
-                continue
-            counts["matched"] += 1
-
-            try:
-                raw_text, _ = generate_json(
-                    "",
-                    CLASSIFICATION_PROMPT.format(
-                        role=job["role"],
-                        company=job["company"],
-                        subject=subject,
-                        body=body,
-                    ),
-                )
-                parsed = json.loads(raw_text)
-                category, reason = parsed.get("category"), parsed.get("reason", "")
-            except Exception:
-                logger.exception(f"Classification failed for email UID {uid}")
-                category, reason = None, ""
-
-            if category == "REJECTION":
-                update_job_status(job["id"], "Rejected")
-                log_activity(
-                    "email_monitor",
-                    f"Rejection detected: {job['role']} at {job['company']} — {reason}",
-                )
-                counts["rejections"] += 1
-            elif category == "INTERVIEW":
-                update_job_status(job["id"], "Interview")
-                log_activity(
-                    "email_monitor",
-                    f"Interview invite detected: {job['role']} at {job['company']} — {reason}",
-                )
-                counts["interviews"] += 1
-            else:
-                update_job_status(job["id"], "Needs Consultation")
-                log_activity(
-                    "email_monitor",
-                    f"Ambiguous email for {job['role']} at {job['company']} — flagged for review.",
-                )
-                counts["flagged"] += 1
-
-        if uids:
-            state["last_uid"] = max(uids)
-            _save_state(state)
-
-    finally:
         try:
-            conn.logout()
+            raw_text, _ = generate_json(
+                "",
+                CLASSIFICATION_PROMPT.format(
+                    role=job["role"],
+                    company=job["company"],
+                    subject=mail["subject"],
+                    body=mail["body"][:2000],
+                ),
+            )
+            parsed = json.loads(raw_text)
+            category, reason = parsed.get("category"), parsed.get("reason", "")
         except Exception:
-            pass
+            logger.exception(f"Classification failed for message {mail['uid']}")
+            category, reason = None, ""
+
+        if category == "REJECTION":
+            update_job_status(job["id"], "Rejected")
+            log_activity(
+                "email_monitor",
+                f"Rejection detected: {job['role']} at {job['company']} — {reason}",
+            )
+            counts["rejections"] += 1
+        elif category == "INTERVIEW":
+            update_job_status(job["id"], "Interview")
+            log_activity(
+                "email_monitor",
+                f"Interview invite detected: {job['role']} at {job['company']} — {reason}",
+            )
+            counts["interviews"] += 1
+        else:
+            update_job_status(job["id"], "Needs Consultation")
+            log_activity(
+                "email_monitor",
+                f"Ambiguous email for {job['role']} at {job['company']} — flagged for review.",
+            )
+            counts["flagged"] += 1
 
     return counts
-
-
-if __name__ == "__main__":
-    print(check_inbox())
 
 
 REPLY_DRAFT_PROMPT = """Draft a brief, professional reply to this email as the job \
@@ -232,175 +157,3 @@ def draft_reply(sender: str, subject: str, body: str, job: dict = None) -> str:
         ),
     )
     return json.loads(raw_text).get("reply", "")
-
-
-def test_connection(
-    imap_email: str, imap_server: str, smtp_server: str, imap_password: str
-) -> tuple:
-    try:
-        conn = imaplib.IMAP4_SSL(imap_server, timeout=10)
-    except Exception as e:
-        return (
-            False,
-            f"Couldn't reach '{imap_server}' — check the IMAP server address. ({e})",
-        )
-
-    try:
-        conn.login(imap_email, imap_password)
-    except imaplib.IMAP4.error as e:
-        try:
-            conn.logout()
-        except Exception:
-            pass
-        error_text = str(e)
-        if (
-            "AUTHENTICATIONFAILED" in error_text.upper()
-            or "invalid credentials" in error_text.lower()
-        ):
-            return (
-                False,
-                "Login rejected — this usually means the password isn't a valid App Password, or 2-Step Verification isn't turned on yet.",
-            )
-        return False, f"IMAP login failed: {error_text}"
-    except Exception as e:
-        return False, f"Unexpected IMAP error: {e}"
-
-    try:
-        conn.select("INBOX")
-    except Exception as e:
-        conn.logout()
-        return False, f"Logged in, but couldn't open the inbox: {e}"
-    conn.logout()
-
-    try:
-        with smtplib.SMTP(smtp_server, 587, timeout=10) as server:
-            server.starttls()
-            server.login(imap_email, imap_password)
-    except Exception as e:
-        return (
-            False,
-            f"Inbox reading works, but sending won't — SMTP login to '{smtp_server}' failed: {e}",
-        )
-
-    return True, "Connected successfully — reading and sending both verified."
-
-
-def _extract_attachments(msg) -> list:
-    attachments = []
-    if msg.is_multipart():
-        for part in msg.walk():
-            if "attachment" in str(part.get("Content-Disposition", "")).lower():
-                filename = part.get_filename()
-                if filename:
-                    payload = part.get_payload(decode=True)
-                    if payload:
-                        attachments.append(
-                            {"filename": _decode_subject(filename), "content": payload}
-                        )
-    return attachments
-
-
-def list_emails(
-    limit: int = 10, offset: int = 0, unread_only: bool = False, search_term: str = None
-) -> tuple:
-    """
-    Paginated, filterable inbox browsing — distinct from check_inbox()'s
-    incremental UID-tracked scan used for automated classification. Returns
-    (emails, total_count_matching_filter).
-    """
-    imap_email, imap_server, smtp_server, imap_password = get_user_email_credentials(
-        get_current_user()
-    )
-    if not imap_email or not imap_password:
-        raise ValueError("No email credentials saved yet — add them in Settings first.")
-
-    conn = imaplib.IMAP4_SSL(imap_server)
-    try:
-        conn.login(imap_email, imap_password)
-        conn.select("INBOX")
-
-        criteria = []
-        if unread_only:
-            criteria.append("UNSEEN")
-        if search_term:
-            escaped = search_term.replace('"', "")
-            criteria.append(f'(OR SUBJECT "{escaped}" FROM "{escaped}")')
-        search_query = " ".join(criteria) if criteria else "ALL"
-
-        result, data = conn.uid("search", None, search_query)
-        if result != "OK" or not data[0]:
-            return [], 0
-
-        all_uids = sorted((int(u) for u in data[0].split()), reverse=True)
-        total_count = len(all_uids)
-        page_uids = all_uids[offset : offset + limit]
-
-        emails = []
-        for uid in page_uids:
-            result, msg_data = conn.uid("fetch", str(uid), "(RFC822 FLAGS)")
-            if result != "OK" or not msg_data or msg_data[0] is None:
-                continue
-            flags_blob = str(msg_data[0][0])
-            msg = email.message_from_bytes(msg_data[0][1])
-            emails.append(
-                {
-                    "uid": uid,
-                    "subject": _decode_subject(msg.get("Subject")),
-                    "sender": msg.get("From", ""),
-                    "date": msg.get("Date", ""),
-                    "body": _extract_body(msg),
-                    "message_id": msg.get("Message-ID", ""),
-                    "seen": "\\Seen" in flags_blob,
-                    "attachments": _extract_attachments(msg),
-                }
-            )
-        return emails, total_count
-    finally:
-        try:
-            conn.logout()
-        except Exception:
-            pass
-
-
-def set_read_status(uid: int, seen: bool):
-    imap_email, imap_server, smtp_server, imap_password = get_user_email_credentials(
-        get_current_user()
-    )
-    conn = imaplib.IMAP4_SSL(imap_server)
-    try:
-        conn.login(imap_email, imap_password)
-        conn.select("INBOX")
-        conn.uid("store", str(uid), "+FLAGS" if seen else "-FLAGS", "(\\Seen)")
-    finally:
-        try:
-            conn.logout()
-        except Exception:
-            pass
-
-
-def send_email(
-    to_address: str,
-    subject: str,
-    body: str,
-    in_reply_to: str = None,
-    references: str = None,
-):
-    imap_email, imap_server, smtp_server, imap_password = get_user_email_credentials(
-        get_current_user()
-    )
-    if not imap_email or not imap_password:
-        raise ValueError("No email credentials saved yet — add them in Settings first.")
-
-    msg = MIMEText(body)
-    msg["Subject"] = subject
-    msg["From"] = imap_email
-    msg["To"] = to_address
-    msg["Message-ID"] = make_msgid()
-    if in_reply_to:
-        msg["In-Reply-To"] = in_reply_to
-        msg["References"] = references or in_reply_to
-
-    with smtplib.SMTP(smtp_server, 587, timeout=15) as server:
-        server.starttls()
-        server.login(imap_email, imap_password)
-        server.sendmail(imap_email, [to_address], msg.as_string())
