@@ -493,6 +493,10 @@ def render_dashboard():
 # =========================================================================
 def render_settings():
     st.title("Settings & Guardrails")
+    with st.expander("🔧 Debug: OAuth config (remove after confirming)"):
+        st.write("CLIENT_ID set:", bool(os.getenv("GOOGLE_CLIENT_ID")))
+        st.write("CLIENT_SECRET set:", bool(os.getenv("GOOGLE_CLIENT_SECRET")))
+        st.write("APP_BASE_URL:", os.getenv("APP_BASE_URL"))
     settings = load_settings()
     resume_path = os.path.join("data", "base_resume.pdf")
 
